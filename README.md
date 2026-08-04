@@ -4,7 +4,8 @@
 
 <p align="center">
   <strong>Sixteen tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
-  Python 3.9+, standard library only, nothing to install.
+  Python 3.9+, standard library only, nothing to install.<br>
+  <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub>
 </p>
 
 <p align="center">
