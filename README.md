@@ -164,3 +164,10 @@ Every tool takes `--json FILE` and `-v`, writes objects carrying a boolean `hard
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Built by <a href="https://github.com/karpovantonme">Anton Karpov</a> — <a href="https://karpovanton.com">karpovanton.com</a><br>
+  Out of reading the places where it lied, on live projects, one case at a time.</sub>
+</p>
