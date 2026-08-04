@@ -52,7 +52,23 @@ A tool like this is only as good as the list of mistakes already worked out of i
 
 Eleven worked cases for this tool, with the reasoning behind each rule: [FALSE-POSITIVES.md](FALSE-POSITIVES.md). The wider kit has 61 so far; they arrive here with their tools.
 
-**If it lies to you, please open an issue with the case.** A file, a line, what it said, what is actually there. Each such case becomes a rule and a test, which is how everything above got here.
+### What to do when it lies
+
+**On your side, before you act on a finding.** Four checks catch almost everything the tool still gets wrong, and each takes seconds:
+
+1. **Look at the lines above the definition.** A compatibility decorator (`@deprecate_kwarg`, `@renamed`, `@deprecated_alias`) adds names the signature never mentions. The tool handles the ones that spell their names out, but not every project spells them out.
+2. **Look at where the file lives.** `archive/`, `sandbox/`, vendored trees. The code may be genuinely wrong there and genuinely not worth a pull request.
+3. **Look for an opt-out on the line itself,** like `# numpydoc ignore=PR01`. Somebody already decided this one is fine.
+4. **After you fix anything, run it again.** Not to admire the zero, but because a rename applied by search and replace lands in the first match, which is often a neighbouring overload that was correct. That has happened here twice in one afternoon.
+
+**On this side, when a case turns out to be real.** The cycle is short and it is the whole method:
+
+- the case is read by hand on the live code, until the mechanism is understood, not just the symptom;
+- a rule is written **only from what the case showed**. Rules extrapolated a step further, on the theory that "if this happens then surely the opposite happens too", cost 14 022 and 162 false findings in two attempts here. Generalising sideways is fine, guessing forward is not;
+- the rule becomes a test, so it cannot quietly come back;
+- the case joins the journal with the number it cost, because the count is what makes the next person believe the list.
+
+**If it lies to you, please open an issue with the case.** A file, a line, what it said, what is actually there. Everything in the table above arrived that way.
 
 ## Where it stays quiet, and why that matters
 
