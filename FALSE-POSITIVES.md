@@ -101,6 +101,13 @@ sent to maintainers if nobody had read them.
 | 59 | refute | The comment rule applied to a finding ABOUT a comment | **killed 24 real findings of 24** on Boost.Geometry | The rule does not apply to detectors judging documentation |
 | 60 | docdrift | `@deprecate_kwarg` accepts a name beyond the signature | **30 of 56** on statsmodels | Names a compatibility decorator spells out are added; an opaque decorator dismisses class A entirely |
 | 61 | docdrift | `TODO: looks like not used yet` inside a Parameters section | 1 on statsmodels | Note keywords are no argument names |
+| 62 | linkdrift | XML and SAML namespace URIs taken for addresses | **8 of 11** on poweradmin | Identifier URIs are excluded and counted separately |
+| 63 | linkdrift | A templated address arrives as a stump: `.../{tenant` | 3 on poweradmin | A single `{` is a template marker, not only the doubled form |
+| 64 | linkdrift | `www.example.com` escaped the illustrative-host filter | **10 of 11** on php-curl-class | Any subdomain of a reserved host is allowed |
+
+Cases 62 to 64 were reported from outside, by [@darkdi](https://github.com/darkdi), in the first three issues this repository ever received. All three were correct, all three are now rules with tests. Between them they accounted for **every finding linkdrift produced on two projects**: eleven out of eleven, twice.
+
+Case 63 deserves a note. `}` is excluded from the address pattern, so `https://login.microsoftonline.com/{tenant}/saml2` was captured as `https://login.microsoftonline.com/{tenant`, and that stump then returned 404 honestly. This is the same species as cases 26, 28 and 32 in this table: a value cut short by a parser matching something real. Fourth occurrence, different tool, different language.
 
 Sixty-one worked cases. None invented: every one turned up on a live project.
 

@@ -168,5 +168,58 @@ class TestOffline(unittest.TestCase):
         self.assertIn("first 5 checked", rep.truncated)
 
 
+class TestReportedByUsers(unittest.TestCase):
+    """Cases brought in by people running the tool. Each one is an issue."""
+
+    def test_templated_stump_is_not_a_dead_link(self):
+        """Issue #2: `}` is excluded from the address, so a templated URL
+        arrives as a stump ending in `{tenant`, and that stump 404s honestly.
+        Three false findings on poweradmin."""
+        for url in (
+            "https://login.microsoftonline.com/{tenant",
+            "https://sts.windows.net/{tenant",
+            "http://www.okta.com/{app-id",
+        ):
+            rep = ld.Report()
+            self.assertFalse(ld.worth_checking(url, rep), url)
+            self.assertIn(url, rep.templated)
+
+    def test_illustrative_host_with_subdomain(self):
+        """Issue #3: the host was anchored straight after the scheme, so
+        `example.com` was caught and `www.example.com` was not. Ten false
+        findings out of eleven on php-curl-class."""
+        for url in (
+            "https://www.example.com/image.png",
+            "https://www.example.com/search",
+            "http://api.example.org/v1",
+            "https://example.com/plain",
+        ):
+            rep = ld.Report()
+            self.assertFalse(ld.worth_checking(url, rep), url)
+            self.assertIn(url, rep.placeholder)
+
+    def test_identifier_uris_are_not_addresses(self):
+        """Issue #1: SAML and XML namespaces are URIs by construction and were
+        never meant to resolve. Eight false findings out of eleven on
+        poweradmin."""
+        for url in (
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+            "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
+            "http://www.w3.org/2001/XMLSchema",
+        ):
+            rep = ld.Report()
+            self.assertFalse(ld.worth_checking(url, rep), url)
+            self.assertIn(url, rep.identifier)
+
+    def test_a_real_dead_link_still_gets_through_the_guards(self):
+        """The guards must not swallow everything: a plain address on a real
+        host still reaches the checker."""
+        rep = ld.Report()
+        self.assertTrue(
+            ld.worth_checking("https://bioinf.wehi.edu.au/featureCounts/", rep))
+
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

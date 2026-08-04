@@ -75,10 +75,31 @@ TEXT_EXT = (".md", ".rst", ".txt", ".adoc", ".yaml", ".yml", ".json", ".html", "
 
 _URL = re.compile(r"https?://[^\s\)\]\}\"'`<>,;]+")
 # A template inside the address: nothing to check
-_TEMPLATED = re.compile(r"\{\{|\}\}|\{%|<[A-Za-z_-]+>|%s|\$\{|\$\(|YOUR[_-]|xxx", re.I)
+# A single `{` had to be a marker too. `}` is excluded from the address pattern,
+# so a templated URL is captured up to the brace and arrives here as a stump:
+# `https://login.microsoftonline.com/{tenant}/saml2` becomes `.../{tenant`, and
+# that stump then 404s honestly. Matching the doubled form only meant three false
+# findings on poweradmin. Reported by @darkdi, issue #2. Same species as the
+# truncated flag name in deaddrift: a cut value that looks like a real one.
+_TEMPLATED = re.compile(
+    r"\{\{|\}\}|\{%|\{[A-Za-z_][\w-]*\}?|<[A-Za-z_-]+>|%s|\$\{|\$\(|YOUR[_-]|xxx", re.I)
+# The host used to be anchored straight after the scheme, so `example.com` was
+# caught and `www.example.com` was not: ten false findings out of eleven on
+# php-curl-class. Reported by @darkdi, issue #3. Any subdomain is allowed now.
 _PLACEHOLDER_HOST = re.compile(
-    r"^https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|example\.(?:com|org|net)|"
-    r"my(?:site|domain|host)\.|foo\.bar|test\.invalid)", re.I
+    r"^https?://(?:[\w-]+\.)*(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|"
+    r"example\.(?:com|org|net)|my(?:site|domain|host)\.|foo\.bar|test\.invalid)", re.I
+)
+
+# Identifiers that are URIs by construction and were never meant to resolve.
+# XML and SAML namespaces, JSON-LD contexts, XML schemas. `schemas.xmlsoap.org`
+# has not served content for years, and every SAML deployment still uses these
+# exact strings verbatim. Eight false findings out of eleven on poweradmin,
+# reported by @darkdi, issue #1.
+_IDENTIFIER_URI = re.compile(
+    r"^https?://(?:schemas\.xmlsoap\.org|schemas\.microsoft\.com|www\.w3\.org/\d{4}/|"
+    r"purl\.org|xmlns\.com|docs\.oasis-open\.org/wss/|json-schema\.org/draft|"
+    r"schema\.org/?$|ns\.adobe\.com|iptc\.org/std/)", re.I
 )
 
 UA = "Mozilla/5.0 (compatible; linkdrift/1.0; +https://github.com/)"
@@ -100,6 +121,7 @@ class Report:
     urls_found: int = 0
     urls_checked: int = 0
     templated: List[str] = dc_field(default_factory=list)
+    identifier: List[str] = dc_field(default_factory=list)
     placeholder: List[str] = dc_field(default_factory=list)
     alive: int = 0
     blocked: List[str] = dc_field(default_factory=list)
@@ -140,6 +162,9 @@ def worth_checking(url: str, report: Report) -> bool:
         return False
     if _PLACEHOLDER_HOST.match(url):
         report.placeholder.append(url)
+        return False
+    if _IDENTIFIER_URI.match(url):
+        report.identifier.append(url)
         return False
     return True
 
@@ -275,6 +300,7 @@ def print_report(report: Report, verbose: bool = False) -> None:
     print(f"  addresses checked:      {report.urls_checked}")
     print(f"  templated:              {len(report.templated)} (nothing to check)")
     print(f"  illustrative hosts:     {len(report.placeholder)} (localhost, example.com)")
+    print(f"  identifier URIs:        {len(report.identifier)} (XML/SAML namespaces, never addresses)")
     print(f"  alive:                  {report.alive}")
     print(f"  not let in:             {len(report.blocked)} (403, 401, 429, page is alive)")
     print(f"  unverified:             {len(report.unknown)} (failure repeated, may be our own link)")
