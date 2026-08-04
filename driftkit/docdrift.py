@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""docdrift.py — numpydoc docstrings against the actual signature.
+"""docdrift.py: numpydoc docstrings against the actual signature.
 
 Two statements about the same thing disagree, and both live in the same
 file, usually in the same declaration. That is what makes the fix obvious
@@ -10,8 +10,8 @@ TWO CLASSES OF FINDING:
 
   A. **the Parameters section documents an argument the signature does not
      have.** Usually a rename: the code changed, the docstring did not.
-     Unambiguous, because the signature is parsed with `ast` rather than a
-     regex. Reported as hard.
+     Unambiguous: the signature comes from `ast`, so the list of names is
+     exact. Reported as hard.
 
   B. **the docstring states a default that differs from the real one.**
      Also compared against `ast`, but this compares free TEXT from the
@@ -247,7 +247,7 @@ def same_number(a, b) -> bool:
 
 
 def is_prose(val: str) -> bool:
-    """Does the documented default read as prose rather than a value.
+    """Does the documented default read as prose.
 
     Docstrings routinely state meaning instead of a literal: "default: all
     nodes in G", "default: len(G)", "default: first node in list(G)".

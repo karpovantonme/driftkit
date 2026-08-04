@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""common.py — the contract shared by every tool in this kit.
+"""common.py: the contract shared by every tool in this kit.
 
 Written once there were eight tools and they had quietly drifted apart:
 

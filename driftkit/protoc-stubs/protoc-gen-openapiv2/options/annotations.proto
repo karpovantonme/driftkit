@@ -1,0 +1,22 @@
+syntax = "proto3";
+package grpc.gateway.protoc_gen_openapiv2.options;
+import "google/protobuf/descriptor.proto";
+
+message SecurityScheme {
+  enum Type { TYPE_INVALID = 0; TYPE_BASIC = 1; TYPE_API_KEY = 2; TYPE_OAUTH2 = 3; }
+  enum In { IN_INVALID = 0; IN_QUERY = 1; IN_HEADER = 2; }
+  Type type = 1;
+  string description = 2;
+  string name = 3;
+  In in = 4;
+}
+message SecurityDefinitions { map<string, SecurityScheme> security = 1; }
+message SecurityRequirement {
+  message SecurityRequirementValue { repeated string scope = 1; }
+  map<string, SecurityRequirementValue> security_requirement = 1;
+}
+message Swagger {
+  SecurityDefinitions security_definitions = 11;
+  repeated SecurityRequirement security = 12;
+}
+extend google.protobuf.FileOptions { Swagger openapiv2_swagger = 1042; }

@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Tests for linkdrift.py: dead external links.
+
+The network is never touched: probing is stubbed out. What gets tested is the
+reason the tool exists, **reading the answer**, not the ability to make requests.
+
+The lesson these tests were written for. The raw result on kotlin-web-site was
+123 "not 200" while 47 were really dead. The whole difference is telling three
+things apart:
+
+  404, 410, 451    dead, that is a finding;
+  403, 401, 429    not let in, the page is alive. The largest share of noise;
+  timeout, reset   the fault may be ours, a second pass is needed.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import linkdrift as ld  # noqa: E402
+
+
+class FakeChecker(ld.Checker):
+    """No network requests at all. Answers are prepared, attempts are counted."""
+
+    def __init__(self, answers, flaky=()):
+        self.answers = answers
+        self.flaky = set(flaky)      # these answer only on the second attempt
+        self.tries = {}
+        self.requests = 0
+        self.from_cache = 0
+        self.offline = False
+        self.cache_dir = tempfile.mkdtemp()
+
+    def check(self, url):
+        n = self.tries.get(url, 0) + 1
+        self.tries[url] = n
+        self.requests += 1
+        if url in self.flaky and n == 1:
+            return "net:timeout"
+        return self.answers.get(url, "200")
+
+
+def project(files: dict) -> str:
+    root = tempfile.mkdtemp()
+    for rel, body in files.items():
+        p = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+    return root
+
+
+def run(files: dict, answers: dict, flaky=()) -> ld.Report:
+    rep = ld.Report()
+    ld.analyse(project(files), rep, FakeChecker(answers, flaky))
+    return rep
+
+
+class TestClassification(unittest.TestCase):
+    def test_dead_codes(self):
+        for code in ("404", "410", "451"):
+            self.assertEqual(ld.classify(code), "dead", code)
+
+    def test_blocked_codes_are_not_findings(self):
+        """403 means bot protection while the page stays alive. The largest
+        share of noise in the raw kotlin-web-site result."""
+        for code in ("401", "403", "429", "503"):
+            self.assertEqual(ld.classify(code), "blocked", code)
+
+    def test_alive(self):
+        for code in ("200", "204", "301", "302"):
+            self.assertEqual(ld.classify(code), "alive", code)
+
+    def test_network_error_is_not_a_verdict(self):
+        self.assertEqual(ld.classify("net:timeout"), "unverified")
+
+
+class TestFindsDeadLinks(unittest.TestCase):
+    FILES = {"docs/a.md": "See [x](https://dead.example/x) and [y](https://live.example/y)\n"}
+
+    def test_dead_link_is_a_finding(self):
+        rep = run(self.FILES, {"https://dead.example/x": "404", "https://live.example/y": "200"})
+        self.assertEqual([f.url for f in rep.findings], ["https://dead.example/x"])
+        self.assertEqual(rep.alive, 1)
+
+    def test_finding_carries_coordinates_and_count(self):
+        rep = run(self.FILES, {"https://dead.example/x": "404"})
+        f = rep.findings[0]
+        self.assertEqual(f.count, 1)
+        self.assertRegex(f.refs[0], r"^docs/a\.md:\d+$")
+        self.assertEqual(f.status, "404")
+
+    def test_blocked_link_is_counted_not_reported(self):
+        rep = run(self.FILES, {"https://dead.example/x": "403", "https://live.example/y": "200"})
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(len(rep.blocked), 1)
+
+
+class TestSecondPass(unittest.TestCase):
+    def test_flaky_link_is_retried_and_then_judged(self):
+        """The failure may have been ours. Without a second pass the raw result
+        on kotlin-web-site was 123 instead of 47."""
+        files = {"a.md": "[x](https://flaky.example/x)\n"}
+        rep = run(files, {"https://flaky.example/x": "404"}, flaky=["https://flaky.example/x"])
+        self.assertEqual([f.url for f in rep.findings], ["https://flaky.example/x"])
+
+    def test_link_that_never_answers_is_not_a_finding(self):
+        files = {"a.md": "[x](https://gone.example/x)\n"}
+        rep = run(files, {"https://gone.example/x": "net:timeout"})
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(len(rep.unknown), 1)
+
+
+class TestNoiseGuards(unittest.TestCase):
+    def test_templated_url_is_skipped(self):
+        files = {"a.md": "curl https://{{ .Values.host }}/api and https://<your-domain>/x\n"}
+        rep = run(files, {})
+        self.assertEqual(rep.findings, [])
+        self.assertGreaterEqual(len(rep.templated), 1)
+
+    def test_teaching_hosts_are_skipped(self):
+        files = {"a.md": "http://localhost:8080/x https://example.com/y\n"}
+        rep = run(files, {})
+        self.assertEqual(rep.findings, [])
+        self.assertGreaterEqual(len(rep.placeholder), 2)
+
+    def test_internal_links_are_not_touched(self):
+        """Internal links are their own species with their own traps: docs get
+        assembled from several repositories."""
+        files = {"a.md": "[x](/docs/x) and [y](../y.md)\n"}
+        rep = run(files, {})
+        self.assertEqual(rep.urls_found, 0)
+
+    def test_one_dead_url_in_many_files_is_one_finding(self):
+        """The kit-wide law: many occurrences of one trouble make one finding."""
+        files = {f"docs/f{i}.md": "[x](https://dead.example/x)\n" for i in range(12)}
+        rep = run(files, {"https://dead.example/x": "404"})
+        self.assertEqual(len(rep.findings), 1)
+        self.assertEqual(rep.findings[0].count, 12)
+        self.assertEqual(len(rep.findings[0].refs), 3, "three coordinates are printed, the rest by count")
+
+    def test_trailing_punctuation_is_trimmed(self):
+        files = {"a.md": "See https://dead.example/x for details.\n"}
+        rep = run(files, {"https://dead.example/x": "404"})
+        self.assertEqual([f.url for f in rep.findings], ["https://dead.example/x"])
+
+
+class TestOffline(unittest.TestCase):
+    def test_offline_checks_nothing_and_says_so(self):
+        rep = ld.Report()
+        root = project({"a.md": "[x](https://dead.example/x)\n"})
+        ld.analyse(root, rep, ld.Checker(tempfile.mkdtemp(), offline=True))
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(len(rep.unknown), 1)
+        self.assertIn("network disabled", rep.unknown[0])
+
+    def test_limit_is_announced_not_silent(self):
+        files = {"a.md": "\n".join(f"https://h{i}.example/x" for i in range(20))}
+        rep = ld.Report()
+        ld.analyse(project(files), rep, FakeChecker({}), limit=5)
+        self.assertEqual(rep.urls_checked, 5)
+        self.assertIn("first 5 checked", rep.truncated)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

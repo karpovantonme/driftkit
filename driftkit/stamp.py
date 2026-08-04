@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""stamp.py — a run stamp under every report.
+"""stamp.py: a run stamp under every report.
 
 Written after a case that cost trust. A pull request to Boost.GIL quoted "42
 mismatches in GIL, 25 in Histogram". Both numbers came from a broken version

@@ -1,5 +1,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-*.json
-!examples/*.json
+.venv/
+
+# Run registries are written next to the kit and belong to one machine
+check-registry.tsv
+review-lessons.tsv
+
+# Tool output
+*.out.json
