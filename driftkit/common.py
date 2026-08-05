@@ -86,5 +86,66 @@ def add_common_args(ap, network: bool = False) -> None:
                         help="stay offline; findings will remain soft")
 
 
+# --------------------------------------------------------------------------
+# Where a check belongs, and how much of it may run at once
+# --------------------------------------------------------------------------
+#
+# The kit holds three kinds of check and they do not belong in the same place.
+# Saying so once, here, is what keeps a laptop from compiling somebody else's
+# test suite, and what keeps a hundred jobs from landing on a shared runner.
+
+LOCAL = "local"      # reads text. Cheap, offline, safe anywhere.
+NETWORK = "network"  # talks to other people's servers. Paced, one run at a time.
+BUILD = "build"      # needs a toolchain and EXECUTES foreign code. Online only.
+
+PLACE = {
+    "ifacedrift": LOCAL,
+    "liftdrift": NETWORK,     # proof by an upstream commit
+    "transdrift": NETWORK,    # proof by a commit
+    "gitdrift": NETWORK,      # proof by dates
+    "supportdrift": LOCAL,
+    "namedrift": LOCAL,
+    "deaddrift": LOCAL,
+    "assertdrift": LOCAL,
+    "linkdrift": NETWORK,     # the only check that must reach live pages
+    "docdrift": LOCAL,
+    "doxdrift": LOCAL,        # the clang engine parses, it does not build
+    "sitecheck": NETWORK,     # liveness comes from the merge log
+    "refute": LOCAL,
+    "probe": BUILD,           # runs the project's own tests
+    "lessons": NETWORK,
+    "buildprobe": BUILD,      # with --run it executes foreign build scripts
+    "racedrift": BUILD,       # runs the project's own suite under the detector
+    "sweep": LOCAL,
+}
+
+# Ceilings that hold in both places. A shared runner belongs to somebody else
+# too: a hundred parallel clones is no technical problem, it is bad manners
+# that gets accounts limited.
+LIMITS = {
+    "targets_per_run": 6,        # projects one online run may touch
+    "parallel_targets": 2,       # of those, how many at a time
+    "job_timeout_minutes": 30,   # a job outliving this is stuck, not slow
+    "network_runs_at_once": 1,   # agreed after two sessions scanned in parallel
+    "clone_depth": 1,            # history is never needed for a scan
+    "requests_pause_seconds": 0.4,
+}
+
+
+def place_of(tool: str) -> str:
+    """Where this check belongs. An undeclared tool counts as local."""
+    return PLACE.get(tool, LOCAL)
+
+
+def runs_here(tool: str, allow_build: bool = False) -> bool:
+    """May this check run on the machine in front of us.
+
+    A build check executes somebody else's code and needs a toolchain, so its
+    home is a disposable runner rather than a laptop. It runs locally only when
+    somebody says so out loud.
+    """
+    return place_of(tool) != BUILD or allow_build
+
+
 def findings_line(hard: int, soft: int) -> str:
     return f"  findings:               {hard} hard, {soft} soft"

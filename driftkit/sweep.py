@@ -410,8 +410,20 @@ def print_report(root: str, plans: Sequence[Plan], results: Sequence[Result],
     print("\n--- Plan ---")
     for p in plans:
         mark = "yes" if p.applies else "no "
+        where = common.place_of(p.tool)
+        # Where a check belongs is part of the plan, not a detail of the run.
+        # A build check executes foreign code and wants a disposable runner;
+        # saying so in the plan is what keeps it off a laptop by accident.
+        tag = {"local": "", "network": "  [network]", "build": "  [online only]"}[where]
         net = " (needs the network for proof)" if p.applies and p.needs_network else ""
-        print(f"  [{mark}] {p.tool:14s} {p.reason}{net}")
+        print(f"  [{mark}] {p.tool:14s} {p.reason}{net}{tag}")
+
+    online = [p.tool for p in plans if p.applies and common.place_of(p.tool) == common.BUILD]
+    if online:
+        print(f"\n  belongs on a runner rather than here: {', '.join(online)}")
+        print(f"  limits for an online run: {common.LIMITS['targets_per_run']} projects, "
+              f"{common.LIMITS['parallel_targets']} at a time, "
+              f"{common.LIMITS['job_timeout_minutes']} min per job")
 
     if not results:
         print("\n(plan only, nothing was run)")

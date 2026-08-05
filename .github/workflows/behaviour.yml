@@ -1,0 +1,112 @@
+name: behaviour
+
+# The family of checks that judges behaviour rather than text: it clones a
+# project, runs the project's own test suite under the race detector and reads
+# the answer. That means **executing somebody else's code**, which is why it
+# lives here and never on a laptop.
+#
+# Only we can start it:
+#
+#   * `workflow_dispatch` is the single trigger, and GitHub grants it to
+#     accounts with write access only. A stranger cannot spend our minutes;
+#   * the job refuses to run under any owner but ours, so a fork gets nothing
+#     from copying this file;
+#   * there is no `pull_request` trigger anywhere in this repository, on purpose.
+#
+# And it stays polite:
+#
+#   * `concurrency` queues runs instead of cancelling them, one at a time, so a
+#     second dispatch waits rather than doubling the load;
+#   * the matrix runs two projects at once, never more;
+#   * every job has a ceiling in minutes, and a job that outlives it is stuck
+#     rather than slow;
+#   * clones are shallow. History is never needed for a scan.
+#
+# The numbers below are the same ones the kit carries in `common.LIMITS`; a test
+# in the kit fails if they drift apart.
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Projects to check, owner/name, space separated (six at most)"
+        required: true
+        default: "cli/cli"
+      timeout_minutes:
+        description: "Ceiling per project"
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: behaviour
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.repository_owner == 'karpovantonme'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.cut.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cut
+        name: Cut the list to what the kit allows
+        # The ceiling is not a suggestion. A dispatch asking for forty projects
+        # gets six, and the run says so rather than quietly obeying.
+        run: |
+          cap=$(python3 -c "import sys; sys.path.insert(0,'driftkit'); import common; print(common.LIMITS['targets_per_run'])")
+          all="${{ github.event.inputs.targets }}"
+          kept=$(echo $all | tr ' ' '\n' | grep -v '^$' | head -n "$cap" | paste -sd' ' -)
+          dropped=$(( $(echo $all | wc -w) - $(echo $kept | wc -w) ))
+          echo "asked for: $all"
+          echo "running:   $kept"
+          echo "dropped:   $dropped over the ceiling of $cap"
+          json=$(echo $kept | tr ' ' '\n' | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")
+          echo "targets=$json" >> "$GITHUB_OUTPUT"
+
+  race:
+    needs: plan
+    if: github.repository_owner == 'karpovantonme'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes || '30') }}
+    strategy:
+      fail-fast: false
+      # Two at a time. A shared runner belongs to somebody else too.
+      max-parallel: 2
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kit
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Clone the target, shallow
+        run: |
+          depth=$(python3 -c "import sys; sys.path.insert(0,'kit/driftkit'); import common; print(common.LIMITS['clone_depth'])")
+          git clone --depth "$depth" "https://github.com/${{ matrix.target }}.git" target
+
+      - name: What the project promises, before anything runs
+        run: |
+          python3 kit/driftkit/buildprobe.py target | tail -12
+
+      - name: Run the suite under the race detector
+        # `--here` is the tool's own way of saying that somebody decided this
+        # machine may execute foreign code. On a runner that is true; the same
+        # command on a laptop refuses without it.
+        run: |
+          python3 kit/driftkit/racedrift.py --dir target --here \
+            --json "findings-$(echo ${{ matrix.target }} | tr '/' '-').json" -v || true
+
+      - name: Keep the findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-${{ strategy.job-index }}
+          path: findings-*.json
+          if-no-files-found: ignore

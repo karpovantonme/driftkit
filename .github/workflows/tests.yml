@@ -1,0 +1,79 @@
+name: tests
+
+# Only we can start this.
+#
+#   * `push` fires on our own branches only, and the job below refuses to run
+#     under any owner but ours, so a fork pushing to itself burns its own
+#     minutes rather than ours;
+#   * there is deliberately no `pull_request` trigger. A pull request from a
+#     stranger would otherwise spend our runners before anybody has read a line
+#     of it. Once we want that, it goes behind `pull_request_target` with a
+#     required approval, and not before;
+#   * `workflow_dispatch` is available to accounts with write access only, which
+#     is the whole point of putting the heavy work behind it.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing here writes anything back to the repository.
+permissions:
+  contents: read
+
+# A newer push makes an older run pointless. Cancelling it frees a runner for
+# somebody else rather than holding one to finish work nobody will read.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    if: github.repository_owner == 'karpovantonme'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      # Two interpreters on purpose. A file whose syntax is newer than the
+      # interpreter does not parse, and the functions inside it are never
+      # looked at; that cost twelve functions of ESMValCore in silence. Running
+      # both versions is how that stays visible.
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: State what this run can and cannot see
+        run: |
+          python3 -c "import sys; print('interpreter:', sys.version.split()[0])"
+          clang++ --version | head -1 || echo "clang++: absent, the second C++ engine will skip"
+          python3 -c "import numpydoc" 2>/dev/null \
+            && echo "numpydoc: present" \
+            || echo "numpydoc: absent, the reference Python engine will skip"
+
+      - name: The optional second engines
+        # The kit runs on the standard library alone. These two only enable the
+        # engines that check the first ones, and a run without them is honest
+        # rather than broken: the tests skip and say so.
+        run: python3 -m pip install --quiet numpydoc
+
+      - name: Run every check in the kit
+        working-directory: driftkit
+        run: |
+          failed=0
+          total=0
+          for t in test_*.py; do
+            out=$(python3 "$t" 2>&1) || { failed=$((failed+1)); echo "$out" | tail -20; }
+            n=$(echo "$out" | grep -oE "Ran [0-9]+ test" | grep -oE "[0-9]+" | tail -1)
+            total=$((total + ${n:-0}))
+            echo "$t: ${n:-0}"
+          done
+          echo "total: $total checks, failing files: $failed"
+          test "$failed" -eq 0
+
+      - name: The kit has to be one thing, not a pile of tools
+        working-directory: driftkit
+        run: python3 test_conformance.py
