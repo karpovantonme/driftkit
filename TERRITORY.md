@@ -22,6 +22,33 @@ Contact: open an issue here.
 
 Everything below is already visible on the profile, this list just saves you the click.
 
+## Organisations, not just repositories
+
+**This is the part people get wrong, and it cost us a closed pull request.**
+
+A repository is not the unit that matters. An organisation is. `astropy` alone has dozens of repositories and a maintainer set that overlaps heavily between them: the person reviewing your patch in one repo reads the others too. Two similar automated pull requests landing anywhere in that organisation within a day read as a campaign, even when they sit in different repositories and both patches are correct.
+
+That is exactly what happened to us. One pull request in `astropy/astroquery` from one contributor, another the next morning from a second contributor, both correct, both closed, with the maintainer saying he wanted to discourage the pattern.
+
+So the rule is: **if any name below appears as the owner of the repository you are about to touch, treat it as taken, whatever the repository is called.** Ask first.
+
+| Organisation | Our pull requests |
+|---|---:|
+| `boostorg/*` | 15 |
+| `supabase/*` | 5 |
+| `astropy/*` | 4 |
+| `mne-tools/*` | 3 |
+| `nilearn/*` | 3 |
+| `GyulyVGC/*` | 2 |
+| `cadet/*` | 2 |
+| `flekschas/*` | 2 |
+| `kubernetes/*` | 2 |
+| `networkx/*` | 2 |
+| `nf-core/*` | 2 |
+| `prometheus/*` | 2 |
+
+Plus one pull request each in: `AFLplusplus`, `ARC-OPT`, `DLR-AMR`, `ESMValGroup`, `JetBrains`, `adtzlr`, `alan-turing-institute`, `deepinv`, `e2b-dev`, `etcd-io`, `hajimes`, `ibis-project`, `idaholab`, `karmada-io`, `koide3`, `mlco2`, `open-telemetry`, `opencv`, `pandas-dev`, `posit-dev`, `rclone`, `scverse`, `statsmodels`, `supabase-community`, `thanos-io`, `traefik`, `vprusso`, `weaviate`, `xgi-org`.
+
 ### Projects with pull requests open or merged
 
 - `AFLplusplus/AFLplusplus`
