@@ -48,4 +48,4 @@ One kind of defect, one project, one pull request. Not "fixed 40 things across t
 
 ## Scientific software deserves extra care
 
-Small communities, maintainers who know each other, and a low tolerance for anything that reads like automated volume. If you go there, go slowly, disclose, and send one thing at a time.
+Small communities, maintainers who know each other, and a low tolerance for anything that reads like automated volume. If you go there, go slowly and send one thing at a time. We had two correct patches closed on one such project in a single morning, for arriving a day apart and looking alike.

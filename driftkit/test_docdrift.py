@@ -591,6 +591,28 @@ def md(text):
             shutil.rmtree(d, ignore_errors=True)
 
 
+    def test_a_section_heading_with_a_trailing_colon(self):
+        """pyGSTi writes `Returns:` above the underline.
+
+        Without allowing that colon the heading failed to match, the word fell
+        through to the parameter rule and `Returns` was reported as a documented
+        name. Found by running the reference parser beside our own: it was in
+        the "ours only" column, which is where our own mistakes surface.
+        """
+        doc = """Apply the error generator.
+
+    Parameters
+    ----------
+    errorgen : Label
+        A label.
+
+    Returns:
+    --------
+    A tuple.
+    """
+        names = [n for group, _t, _l in docdrift.doc_params(doc) for n in group]
+        self.assertEqual(names, ["errorgen"])
+
     def test_an_older_interpreter_is_named_before_the_run(self):
         """anndata asks for 3.12; on 3.9 twenty-one files never parse."""
         d = tempfile.mkdtemp()
@@ -660,6 +682,26 @@ def f(cube, normalize):
 ''')
         hits = docdrift.scan_numpydoc(self.dir)
         self.assertEqual([h["param"] for h in hits], ["missing"])
+
+    def test_a_name_with_no_space_before_the_colon(self):
+        """`create_using: NetworkX graph container, optional` in networkx.
+
+        With no space before the colon numpydoc puts the whole line into the
+        name and leaves the type empty. Splitting that on commas turned the
+        word `optional` into a parameter, 291 times across the pool: an
+        artefact of the adapter rather than of either parser. The name is cut
+        at the first colon before anything else happens to it.
+        """
+        got = docdrift.doc_params_numpydoc("""Parse.
+
+Parameters
+----------
+create_using: NetworkX graph container, optional
+   Use given graph.
+x, y : int
+   A pair.
+""")
+        self.assertEqual([names for names, _t, _l in got], [["create_using"], ["x", "y"]])
 
     def test_both_engines_emit_the_same_shape(self):
         """The refuter and the sweep must not be able to tell them apart."""

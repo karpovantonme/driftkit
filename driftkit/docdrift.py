@@ -63,9 +63,11 @@ SKIP_DIRS = common.SKIP_DIRS | {
     ".tox",
 }
 
-SEC = re.compile(r'^\s*(Parameters|Other Parameters|Keyword Arguments)\s*$')
+# A trailing colon after the heading is allowed. pyGSTi writes `Returns:` above
+# the underline, and without this the word itself became a documented parameter.
+SEC = re.compile(r'^\s*(Parameters|Other Parameters|Keyword Arguments)\s*:?\s*$')
 UNDER = re.compile(r'^\s*-{3,}\s*$')
-ANYSEC = re.compile(r'^\s*(Returns?|Yields?|Raises|See Also|Notes?|Examples?|References?|Attributes|Warns|Warnings|Methods|Other Parameters)\s*$')
+ANYSEC = re.compile(r'^\s*(Returns?|Yields?|Raises|See Also|Notes?|Examples?|References?|Attributes|Warns|Warnings|Methods|Other Parameters)\s*:?\s*$')
 # The type after the colon is optional. Modern numpydoc for annotated code
 # writes none, because the type lives in the annotation:
 #     cube:
@@ -82,7 +84,7 @@ PARAMLINE = re.compile(
 # as a flag name truncated mid-word.
 DEFAULT_IN_TYPE = re.compile(
     r'(?:default[\s:=]+|defaults to\s+)(?P<val>[^,;)\]]+?)(?=\.\s|[,;)\]]|$)', re.I)
-EXAMPLES = re.compile(r'^\s*Examples?\s*$')
+EXAMPLES = re.compile(r'^\s*Examples?\s*:?\s*$')
 # Notes inside a Parameters section parse as arguments: the line
 # `TODO: looks like not used yet` is shaped exactly like `name : type`.
 # Seen in the wild in statsmodels, `gradient_momcond`.
@@ -447,7 +449,12 @@ def doc_params_numpydoc(doc: str):
     imports across foreign clones means executing their code. Only the parser
     is used here, and the signature still comes from `ast`.
 
-    The name it returns keeps a trailing colon (`cube:`), so that gets stripped.
+    Reading its output takes care. With no space before the colon, as in
+    `create_using: NetworkX graph container, optional`, numpydoc puts the whole
+    line into the name and leaves the type empty. Splitting that on commas turns
+    the word `optional` into a parameter: 291 of them across the pool, and every
+    one an artefact of the adapter rather than of either parser. So the name is
+    cut at the first colon, and only then split.
     """
     from numpydoc.docscrape import NumpyDocString
 
@@ -459,7 +466,8 @@ def doc_params_numpydoc(doc: str):
     out = []
     for section in ("Parameters", "Other Parameters"):
         for p in parsed.get(section, []):
-            names = [n.strip().strip(":").lstrip("*") for n in p.name.split(",")]
+            head = p.name.split(":", 1)[0]
+            names = [n.strip().lstrip("*") for n in head.split(",")]
             names = [n for n in names if re.fullmatch(r"\w+", n) and n not in NOTE_WORDS]
             if names:
                 out.append((names, p.type or "", 0))

@@ -232,6 +232,13 @@ def tpl_params(decl):
     out.append(cur)
     res = []
     for n in out:
+        # A macro carrying the default value sits after the parameter name:
+        # `class Options BOOST_CONTAINER_DOCONLY(= void)`. Taking the last
+        # identifier then yields the macro instead of `Options`, and every
+        # `\tparam Options` in Boost.Container reads as undocumented. The same
+        # guard already stood over function arguments; template parameters had
+        # none.
+        n = re.sub(r'\b[A-Z][A-Z0-9_]{3,}\s*\([^)]*\)\s*$', '', n).strip()
         n = n.split('=')[0].strip()
         m = re.findall(r'[A-Za-z_]\w*', n)
         if m: res.append(m[-1])

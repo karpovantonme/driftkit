@@ -114,6 +114,10 @@ sent to maintainers if nobody had read them.
 | 72 | doxdrift, clang engine | Doxygen aliases declared in the project Doxyfile read as parameter names | **605 of 605** on Boost.Geometry | No space between the command and the name marks an alias; the identifier part is compared, so `\param_strategy{Area}` is recognised too |
 | 73 | doxdrift, clang engine | The skipped-alias counter counted mentions | 58,918 where there were 589 | The key is the coordinate of the warning |
 | 74 | docdrift, numpydoc engine | A section whose underline is shorter than its heading is folded into Parameters | 6 of 9 on great-tables | Our own rule takes three dashes or more, so it sees the section; the reference parser requires an exact match |
+| 75 | the adapter to numpydoc | With no space before the colon the reference parser puts the whole line in the name; splitting it on commas made `optional` a parameter | **291 across the pool** | The name is cut at the first colon before it is split |
+| 76 | docdrift | A section heading written `Returns:` with a trailing colon was not recognised, and the word fell through to the parameter rule | 10 across the pool | A trailing colon after a heading is allowed |
+| 77 | docdrift, numpydoc engine | Without a blank line before `Parameters` the reference parser sees no section at all | 1 known, unknown in general | Recorded rather than fixed: our own rule is the forgiving one here |
+| 78 | doxdrift | A macro carrying the default of a template parameter: `class Options BOOST_CONTAINER_DOCONLY(= void)` | every `\tparam` in Boost.Container | The trailing uppercase macro is stripped before the name is taken; the same guard already stood over function arguments |
 
 Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
 
@@ -121,7 +125,7 @@ Cases 62 to 64 were reported from outside, by [@darkdi](https://github.com/darkd
 
 Case 63 deserves a note. `}` is excluded from the address pattern, so `https://login.microsoftonline.com/{tenant}/saml2` was captured as `https://login.microsoftonline.com/{tenant`, and that stump then returned 404 honestly. This is the same species as cases 26, 28 and 32 in this table: a value cut short by a parser matching something real. Fourth occurrence, different tool, different language.
 
-Seventy-four worked cases. None invented: every one turned up on a live project.
+Seventy-eight worked cases. None invented: every one turned up on a live project.
 
 The numeric summary of cases 50 to 55 is worth stating on its own, because it
 shows the price of reading. Five scientific Python projects, networkx, pyTMD,
@@ -162,6 +166,12 @@ live parameters, `0` is a plausible default.
 
 **The rule:** after extracting a name, check that the source line does not
 continue it. The check does not care which character was forgotten.
+
+Case 78 is the same shape one level up: the guard existed, but only on one of
+the two lists. Function arguments had the trailing-macro guard from the start;
+template parameters never got it, so `class Options BOOST_CONTAINER_DOCONLY(= void)`
+yielded the macro name. **When a guard is written, ask what else parses the same
+kind of text.**
 
 **The hunt across the rest of the kit.** After the fifth occurrence the species
 was looked for deliberately in every other tool. Nothing new turned up, and the
@@ -216,6 +226,14 @@ now the tool has looked at less than it claimed:
 actually looked at, and everything skipped needs its own line, printed even when
 it is zero. A count that silently includes what was skipped is worse than no
 count, because it invites trust.
+
+**A second engine is the sharpest form of this check.** Two independent ways of
+reaching the same finding, compared across the whole pool rather than three
+sample projects, turned up three separate bugs in one afternoon: one in the
+adapter between them (case 75), one in our own parser (case 76), and one in the
+reference implementation (case 74). None would have surfaced from either side
+alone, because each side was internally consistent. The numbers went 228/490
+with 199 agreed, to 228/270 with 218 agreed, to **218/270 with 216 agreed**.
 
 **The check that finds this family:** run the same tool twice under conditions
 that differ in one thing only, and compare the coverage block rather than the
