@@ -46,6 +46,6 @@ We keep the ones we are working on in [TERRITORY.md](TERRITORY.md) next to this 
 
 One kind of defect, one project, one pull request. Not "fixed 40 things across the codebase". A maintainer can review a narrow change in five minutes and will; a broad one waits for a free evening that never comes.
 
-## Scientific software deserves extra care
+## Scientific software: check for duplicates twice
 
-Small communities, maintainers who know each other, and a low tolerance for anything that reads like automated volume. If you go there, go slowly and send one thing at a time. We had two correct patches closed on one such project in a single morning, for arriving a day apart and looking alike.
+Small communities, maintainers who know each other, and a low tolerance for anything that reads like automated volume. Nothing wrong with contributing there, the projects are good. Just do the duplicate check properly: we had two correct patches closed on one such project in a single morning, for arriving a day apart and looking alike.
