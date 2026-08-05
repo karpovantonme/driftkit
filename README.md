@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="#tests"><img alt="447 checks" src="https://img.shields.io/badge/checks-451%20green-3fb950?style=flat-square"></a>
-  <a href="FALSE-POSITIVES.md"><img alt="61 false positives worked out" src="https://img.shields.io/badge/false%20positives-64%20worked%20out-f85149?style=flat-square"></a>
+  <a href="FALSE-POSITIVES.md"><img alt="61 false positives worked out" src="https://img.shields.io/badge/false%20positives-66%20worked%20out-f85149?style=flat-square"></a>
   <a href="#findings-that-became-merged-pull-requests"><img alt="17 merged" src="https://img.shields.io/badge/merged%20upstream-17-1f6feb?style=flat-square"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7d8590?style=flat-square"></a>
 </p>
@@ -106,7 +106,7 @@ A tool like this is worth exactly the list of mistakes already worked out of it,
 | A name insertion counted as a typo | **162** | Transposition and substitution only |
 | An AI section in CONTRIBUTING taken for a ban | **would have skipped rclone, where we have a merge** | Judge by the requirements, not the heading |
 
-Sixty-four worked cases, twelve species of mistake, and the table of what the kit is **not** immunised against yet: **[FALSE-POSITIVES.md](FALSE-POSITIVES.md)**.
+Sixty-six worked cases, twelve species of mistake, and the table of what the kit is **not** immunised against yet: **[FALSE-POSITIVES.md](FALSE-POSITIVES.md)**.
 
 Two of those entries are worth singling out, because they are the dangerous kind: a self-refutation step that quietly killed real findings, and a directory mask that dropped `.github` and so reduced coverage without saying so. Both made the report look *cleaner*. That is why every run ends with a coverage block: `findings: 0 hard` next to `files read: 0` means "nothing to compare", not "clean".
 

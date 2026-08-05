@@ -104,6 +104,10 @@ sent to maintainers if nobody had read them.
 | 62 | linkdrift | XML and SAML namespace URIs taken for addresses | **8 of 11** on poweradmin | Identifier URIs are excluded and counted separately |
 | 63 | linkdrift | A templated address arrives as a stump: `.../{tenant` | 3 on poweradmin | A single `{` is a template marker, not only the doubled form |
 | 64 | linkdrift | `www.example.com` escaped the illustrative-host filter | **10 of 11** on php-curl-class | Any subdomain of a reserved host is allowed |
+| 65 | linkdrift | Addresses inside a saved copy of somebody else's page | **57 of 101** on astroquery | Fixture directories are skipped, and the count of skipped files is printed |
+| 66 | linkdrift | A temporary workspace address printed in an example of output | 14 of 101 on astroquery | Working paths, session ids and job numbers are excluded |
+
+Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
 
 Cases 62 to 64 were reported from outside, by [@darkdi](https://github.com/darkdi), in the first three issues this repository ever received. All three were correct, all three are now rules with tests. Between them they accounted for **every finding linkdrift produced on two projects**: eleven out of eleven, twice.
 
