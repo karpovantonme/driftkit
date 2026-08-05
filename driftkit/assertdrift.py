@@ -185,7 +185,9 @@ def analyse(root: str, report: Report) -> None:
     if yaml is None:
         sys.exit("pyyaml required: pip3 install pyyaml")
     for dirpath, dirs, names in os.walk(root):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "vendor"]
+        dirs[:] = [d for d in dirs
+                   if d not in common.SKIP_DIRS
+                   and (d in common.KEEP_HIDDEN or not d.startswith("."))]
         for n in sorted(names):
             if n.endswith(("_test.yaml", "_test.yml")):
                 scan_file(os.path.join(dirpath, n), root, report)

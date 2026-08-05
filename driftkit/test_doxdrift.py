@@ -11,6 +11,7 @@ the whole precision story.
 
 import json
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -275,6 +276,149 @@ void f(int a);
     def test_coordinate_is_a_file_line(self):
         h = findings_in("\n\n/** Does the thing.\n * \\param missing description\n */\nvoid f(int a);\n")
         self.assertEqual(h[0]["line"], 3)
+
+
+# ------------------------------------------------- the second engine: clang
+
+
+class TestClangEngine(unittest.TestCase):
+    """The compiler as a source of the same findings.
+
+    The engine is measured rather than trusted: on four Boost libraries 2233
+    headers of 2233 parsed with empty stubs standing in for missing includes,
+    and no build at all. Where a declaration still fails to parse, clang goes
+    silent rather than wrong, so it under-reports exactly where the stubs were
+    needed. That is why it is a second engine and not a replacement.
+    """
+
+    SAMPLE = """/// Does the thing.
+/// \\param corpus_first where to start
+/// \\param p the pattern
+template <typename Iter>
+Iter search(Iter corpus_first, Iter corpus_last) { return corpus_first; }
+"""
+
+    def setUp(self):
+        if not doxdrift.clang_available():
+            self.skipTest("clang++ is not installed")
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_compiler_finds_the_same_species(self):
+        """`\\param p` against a signature that has no `p`."""
+        pathlib.Path(self.dir, "a.hpp").write_text(self.SAMPLE, encoding="utf-8")
+        hits = doxdrift.scan_clang(self.dir)
+        self.assertEqual([h["name"] for h in hits], ["p"])
+        self.assertEqual(hits[0]["kind"], "param")
+        self.assertTrue(hits[0]["hard"])
+
+    def test_it_carries_the_name_the_compiler_suggests(self):
+        """clang answers `did you mean 'corpus_last'?`, which no regex can."""
+        pathlib.Path(self.dir, "a.hpp").write_text(self.SAMPLE, encoding="utf-8")
+        hits = doxdrift.scan_clang(self.dir)
+        self.assertIn("corpus_last", hits[0]["sig"] + [hits[0]["note"]])
+
+    def test_a_missing_include_is_stubbed_rather_than_fatal(self):
+        """Missing includes stop the parse dead; empty stubs let it through."""
+        pathlib.Path(self.dir, "a.hpp").write_text(
+            "#include <no/such/header.hpp>\n" + self.SAMPLE, encoding="utf-8")
+        hits = doxdrift.scan_clang(self.dir)
+        self.assertEqual([h["name"] for h in hits], ["p"])
+        self.assertGreaterEqual(doxdrift.COUNTS["stubs"], 1)
+
+    def test_a_warning_from_an_included_header_is_counted_once(self):
+        """A warning arrives once per file that includes the header.
+
+        Counting them per compiled file counts mentions instead of entities:
+        on Boost.Geometry that gave 64,966 instead of 605.
+        """
+        pathlib.Path(self.dir, "shared.hpp").write_text(self.SAMPLE, encoding="utf-8")
+        for name in ("one.hpp", "two.hpp", "three.hpp"):
+            pathlib.Path(self.dir, name).write_text('#include "shared.hpp"\n', encoding="utf-8")
+        hits = doxdrift.scan_clang(self.dir)
+        self.assertEqual(len(hits), 1, "the same warning was counted more than once")
+
+    def test_both_engines_emit_the_same_shape(self):
+        """The refuter and the sweep must not be able to tell them apart."""
+        pathlib.Path(self.dir, "a.hpp").write_text(self.SAMPLE, encoding="utf-8")
+        by_clang = doxdrift.scan_clang(self.dir)
+        by_regex = doxdrift.scan(self.dir)
+        for h in by_clang + by_regex:
+            for key in ("kind", "hard", "file", "line", "name"):
+                self.assertIn(key, h)
+        self.assertEqual([h["name"] for h in by_regex], [h["name"] for h in by_clang])
+
+    def test_a_doxygen_alias_of_the_project_is_not_a_parameter(self):
+        """Boost.Geometry writes `\\param geometry \\param_geometry`.
+
+        The second word is an alias declared in the project Doxyfile. The
+        compiler knows nothing about a Doxyfile and reports a parameter called
+        `_geometry`. On that tree it produced 605 warnings and every one was
+        this. The signal is exact: no space between the command and the name.
+        """
+        pathlib.Path(self.dir, "a.hpp").write_text(
+            "/// Appends a point.\n"
+            "/// \\param geometry \\param_geometry\n"
+            "/// \\param range_or_point The point to add\n"
+            "template <typename Geometry, typename RangeOrPoint>\n"
+            "void append(Geometry& geometry, RangeOrPoint const& range_or_point) {}\n",
+            encoding="utf-8")
+        hits = doxdrift.scan_clang(self.dir)
+        self.assertEqual(hits, [], "a project alias was taken for a parameter")
+        self.assertGreaterEqual(doxdrift.COUNTS["aliases"], 1)
+
+    def test_an_alias_with_an_argument_in_braces(self):
+        """Boost.Geometry also writes `\\param_strategy{Area}`.
+
+        The compiler reports the whole thing as the name, braces included, so
+        only the identifier part can be compared. Sixty-six warnings of this
+        shape survived the first version of the guard.
+        """
+        pathlib.Path(self.dir, "c.hpp").write_text(
+            "/// Area.\n"
+            "/// \\param strategy \\param_strategy{Area}\n"
+            "/// \\param geometry \\param_geometry\n"
+            "template <typename G, typename S>\n"
+            "void area(G const& geometry, S const& strategy) {}\n", encoding="utf-8")
+        self.assertEqual(doxdrift.scan_clang(self.dir), [])
+        self.assertEqual(doxdrift.COUNTS["aliases"], 2)
+
+    def test_aliases_are_counted_as_entities_not_mentions(self):
+        """The same alias arrives from every file that includes the header.
+
+        Counting mentions gave 58,918 skipped aliases where there were far
+        fewer. Third time this species turned up in one day.
+        """
+        pathlib.Path(self.dir, "shared.hpp").write_text(
+            "/// Area.\n/// \\param geometry \\param_geometry\n"
+            "template <typename G> void area(G const& geometry) {}\n", encoding="utf-8")
+        for name in ("one.hpp", "two.hpp", "three.hpp"):
+            pathlib.Path(self.dir, name).write_text('#include "shared.hpp"\n', encoding="utf-8")
+        doxdrift.scan_clang(self.dir)
+        self.assertEqual(doxdrift.COUNTS["aliases"], 1)
+
+    def test_a_real_underscored_parameter_survives(self):
+        """The guard is narrow: `\\param _term` with a space is a real name."""
+        pathlib.Path(self.dir, "b.hpp").write_text(
+            "/// Does the thing.\n"
+            "/// \\param -term the term\n"
+            "void f(int _term) {}\n", encoding="utf-8")
+        hits = doxdrift.scan_clang(self.dir)
+        self.assertEqual([h["name"] for h in hits], ["-term"])
+
+    def test_the_engine_is_named_in_the_coverage_block(self):
+        """A number without the engine that produced it cannot be compared."""
+        import io
+        from contextlib import redirect_stdout
+        pathlib.Path(self.dir, "a.hpp").write_text(self.SAMPLE, encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            doxdrift.print_report(doxdrift.scan_clang(self.dir), self.dir, False, "clang")
+        text = buf.getvalue()
+        self.assertIn("engine:                 clang", text)
+        self.assertIn("stub headers created", text)
 
 
 if __name__ == "__main__":

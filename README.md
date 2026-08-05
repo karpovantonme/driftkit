@@ -137,6 +137,12 @@ Not examples written for a README.
 
 Fifty-eight sent, seventeen merged, median time to merge fifteen hours.
 
+## If you are running this with an agent
+
+The kit plus an agent can open twenty pull requests in an afternoon, and twenty pull requests in an afternoon is what gets all of them closed unread. That happened to us: two people ran the same checker against the same project a day apart, both patches were correct, and the maintainer closed both.
+
+Read **[USING-THIS-WITH-AN-AGENT.md](USING-THIS-WITH-AN-AGENT.md)** first. Short version: say a tool found it, read the project's own rules before writing anything, never send a finding you have not opened in an editor, and check **[TERRITORY.md](TERRITORY.md)** so you do not land where someone already is. Add yourself there while you are at it.
+
 ## Install
 
 There is nothing to install.

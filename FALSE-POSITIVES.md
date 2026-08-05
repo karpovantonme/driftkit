@@ -5,7 +5,7 @@
 ## Why this file exists
 
 The kit, eleven detectors and five pipeline stages, was not written out of lucky
-guesses. It was written out of **reading the places where it lied**. Sixty-one
+guesses. It was written out of **reading the places where it lied**. Sixty-eight
 worked cases so far, and not one of them came from imagination: every one turned
 up on a live project, was read by hand, and only then became a rule and a test.
 
@@ -106,6 +106,14 @@ sent to maintainers if nobody had read them.
 | 64 | linkdrift | `www.example.com` escaped the illustrative-host filter | **10 of 11** on php-curl-class | Any subdomain of a reserved host is allowed |
 | 65 | linkdrift | Addresses inside a saved copy of somebody else's page | **57 of 101** on astroquery | Fixture directories are skipped, and the count of skipped files is printed |
 | 66 | linkdrift | A temporary workspace address printed in an example of output | 14 of 101 on astroquery | Working paths, session ids and job numbers are excluded |
+| 67 | docdrift | The section indent came from the first line that matched, usually a wrapped URL | **2654 functions never looked at** across the pool, ibis 632 of 682 | The indent comes from the `Parameters` heading; a name with no type, and with no colon, is still a parameter |
+| 68 | docdrift | `files read` counted files where `ast.parse` had raised | 3 files, 12 functions, on ESMValCore | Parse failures are counted apart and the line is printed even at zero |
+| 69 | gitdrift, assertdrift | A private skip list written inline in the walk | unknown, by construction | The shared list; the conformance test now reads the whole statement rather than its first line |
+| 70 | deaddrift, namedrift, linkdrift, doxdrift, gitdrift | An unreadable or oversized file was dropped with no trace | unknown, by construction | Skipped files are counted and printed, even at zero |
+| 71 | the measuring harness | A warning from an included header counted once per file that includes it | **64,966 instead of 605** on Boost.Geometry | The key is the coordinate of the warning itself |
+| 72 | doxdrift, clang engine | Doxygen aliases declared in the project Doxyfile read as parameter names | **605 of 605** on Boost.Geometry | No space between the command and the name marks an alias; the identifier part is compared, so `\param_strategy{Area}` is recognised too |
+| 73 | doxdrift, clang engine | The skipped-alias counter counted mentions | 58,918 where there were 589 | The key is the coordinate of the warning |
+| 74 | docdrift, numpydoc engine | A section whose underline is shorter than its heading is folded into Parameters | 6 of 9 on great-tables | Our own rule takes three dashes or more, so it sees the section; the reference parser requires an exact match |
 
 Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
 
@@ -113,7 +121,7 @@ Cases 62 to 64 were reported from outside, by [@darkdi](https://github.com/darkd
 
 Case 63 deserves a note. `}` is excluded from the address pattern, so `https://login.microsoftonline.com/{tenant}/saml2` was captured as `https://login.microsoftonline.com/{tenant`, and that stump then returned 404 honestly. This is the same species as cases 26, 28 and 32 in this table: a value cut short by a parser matching something real. Fourth occurrence, different tool, different language.
 
-Sixty-one worked cases. None invented: every one turned up on a live project.
+Seventy-four worked cases. None invented: every one turned up on a live project.
 
 The numeric summary of cases 50 to 55 is worth stating on its own, because it
 shows the price of reading. Five scientific Python projects, networkx, pyTMD,
@@ -184,12 +192,65 @@ stale table.
 **The rule:** one dead address repeated in fifty files is one finding. Print the
 address, the count and the first three coordinates.
 
+### C-bis. The report covers less than it says
+
+**Cases 43, 58, 67, 68, and this family costs more than every false finding put
+together.**
+
+A false finding shouts. A gap in coverage stays silent and makes the report look
+**tidier**: fewer lines, cleaner output, the same confident summary. Four times
+now the tool has looked at less than it claimed:
+
+- a hidden-name mask dropped `.github`, and CI matrices went unread;
+- a coordinate split across two fields was unreadable, so nineteen findings were
+  never checked while the report said "nothing to refute against";
+- the section indent was taken from the first line that happened to match. A
+  description wrapped onto the next line carries its own colon, a wrapped URL
+  carries one inside `https://`, and that line then set the indent. Every real
+  parameter of the function became invisible: **2654 functions across the pool,
+  93% of ibis, 92% of anndata, 90% of great-tables**, all reported as checked;
+- `ast.parse` raised on syntax newer than the running interpreter, the exception
+  was swallowed, and the file still counted as read.
+
+**The rule:** every number in the coverage block has to be the number of things
+actually looked at, and everything skipped needs its own line, printed even when
+it is zero. A count that silently includes what was skipped is worse than no
+count, because it invites trust.
+
+**The check that finds this family:** run the same tool twice under conditions
+that differ in one thing only, and compare the coverage block rather than the
+findings. Two interpreters, two directory masks, two coordinate formats. The
+findings can legitimately match; the coverage cannot.
+
+That check was then run across the whole kit deliberately, and it paid twice
+(cases 69 and 70). `gitdrift` named three directories inline inside its walk, so
+it never matched the `SKIP_DIRS =` pattern the contract looks for and quietly
+walked trees the rest of the kit skips; `assertdrift` did the same with two. And
+five tools dropped an unreadable or oversized file with `continue` and no
+counter at all. Neither produced a single false finding. Both made every report
+they ever wrote slightly cleaner than the run had been.
+
+**The rule that came out of it:** a `continue` in a reading loop needs a counter
+next to it. If skipping is worth doing, it is worth printing.
+
 ### C. Mentions counted instead of entities
 
 The newcomer count in the project survey counted edits rather than people: 23
 "newcomers" in one project turned out to be one person.
 
-**The rule:** count the entity you are actually claiming something about.
+Case 71 is the same species in a place nobody watches: **the harness built to
+measure the tools**. A clang warning from an included header arrives once per
+file that includes it, and Boost.Geometry headers include each other in the
+hundreds, so counting per compiled file reported 64,966 where there were 605.
+
+**The rule:** count the entity you are actually claiming something about. And a
+measuring script is a tool too. It lies in exactly the same species as the tools
+it measures, with one difference: nobody checks it, because it is "temporary".
+
+The species turned up three times in one day: the newcomer count, the measuring
+harness, and then the shipped tool itself (case 73). Whenever something arrives
+through an include, an import or a reference, ask what the unit of counting is
+before printing the number.
 
 ### D. A negative claim from an incomplete source
 

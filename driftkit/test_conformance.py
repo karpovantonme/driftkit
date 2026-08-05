@@ -171,6 +171,44 @@ class TestContract(unittest.TestCase):
                 f"{t}: header does not say what the tool cannot see",
             )
 
+    def test_no_private_skip_list_inside_a_walk(self):
+        """A skip list written inline in `os.walk` escapes the check above.
+
+        `gitdrift` named three directories right inside `dirs[:] = [...]`, so it
+        never matched the `SKIP_DIRS =` pattern and quietly walked trees the rest
+        of the kit skips. A private list drifts apart; that is the bug this file
+        exists for, in a place the file could not see.
+        """
+        for t in TOOLS + ["sweep"]:
+            s = source(t)
+            # The whole statement, not the first line of it: a list written
+            # across three lines used to slip past this very check.
+            for m in re.finditer(r"dirs\[:\]\s*=\s*(.+?\])", s, re.S):
+                self.assertTrue(
+                    "SKIP_DIRS" in m.group(1) or "common." in m.group(1),
+                    f"{t}: a skip list written inline in the walk",
+                )
+
+    def test_every_reader_counts_what_it_skips(self):
+        """A file dropped without a counter makes the report look cleaner.
+
+        Four tools used to `continue` past an unreadable or oversized file with
+        no trace at all. The whole species is about coverage rather than false
+        findings, and it costs more: a false finding shouts, a gap stays silent.
+        """
+        for t in ("deaddrift", "namedrift", "linkdrift", "doxdrift", "gitdrift", "docdrift"):
+            if t not in TOOLS:
+                continue
+            s = source(t)
+            self.assertRegex(
+                s, r"(files_skipped|skipped_files|COUNTS\[.skipped.\]|unparsable)",
+                f"{t}: skipped files are not counted",
+            )
+            self.assertRegex(
+                s, r"(files skipped|headers skipped|failed to parse)",
+                f"{t}: skipped files are not printed in the coverage block",
+            )
+
     def test_no_private_skip_lists(self):
         """The skip list was declared three times, differently each time.
         There is one for the whole kit."""

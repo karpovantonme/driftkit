@@ -66,7 +66,16 @@ SKIP_DIRS = common.SKIP_DIRS | {
 SEC = re.compile(r'^\s*(Parameters|Other Parameters|Keyword Arguments)\s*$')
 UNDER = re.compile(r'^\s*-{3,}\s*$')
 ANYSEC = re.compile(r'^\s*(Returns?|Yields?|Raises|See Also|Notes?|Examples?|References?|Attributes|Warns|Warnings|Methods|Other Parameters)\s*$')
-PARAMLINE = re.compile(r'^(?P<ind>\s*)(?P<names>[*\w][\w\s,*]*?)\s*:\s*(?P<type>.+?)\s*$')
+# The type after the colon is optional. Modern numpydoc for annotated code
+# writes none, because the type lives in the annotation:
+#     cube:
+#         Input cube that will be normalized.
+# Requiring a type made such a line invisible, and with it every parameter of
+# the function. Across the pool that was 2654 functions the tool never looked
+# at while reporting their projects as checked: ibis 632 of 682, anndata 36 of
+# 39, great-tables 119 of 132.
+PARAMLINE = re.compile(
+    r'^(?P<ind>\s*)(?P<names>[*\w][\w\s,*]*?)\s*(?::\s*(?P<type>.*?))?\s*$')
 # A dot used to terminate the value, so `default 0.01` was read as `0` and
 # every fractional default became a mismatch. The value now ends at a sentence
 # boundary (". ") or at a comma, not at the first dot. Same family of mistake
@@ -95,13 +104,33 @@ def cut_at_examples(lines):
     return lines
 
 
+def described_below(lines, idx: int, base_ind: int) -> bool:
+    """Does a deeper-indented description follow this line."""
+    for k in range(idx + 1, min(idx + 3, len(lines))):
+        ln = lines[k]
+        if not ln.strip():
+            continue
+        return len(ln) - len(ln.lstrip()) > base_ind
+    return False
+
+
 def doc_params(doc):
-    """-> [(names, type string, line number inside the docstring)]"""
+    """-> [(names, type string, line number inside the docstring)]
+
+    The indentation of a parameter line is known in advance: numpydoc puts
+    parameter names at the same indent as the `Parameters` heading and their
+    descriptions deeper. Taking the base indent from the first line that
+    happened to match instead was the single most expensive bug in this tool.
+    A description wrapped onto the next line carries its own colon, and a
+    wrapped URL carries one inside `https://`; that line then set the base
+    indent, so `https` became a parameter and every real parameter of the
+    function became invisible.
+    """
     lines = cut_at_examples(doc.split('\n'))
     out, i = [], 0
     while i < len(lines) - 1:
         if SEC.match(lines[i]) and UNDER.match(lines[i + 1]):
-            base_ind = None
+            base_ind = len(lines[i]) - len(lines[i].lstrip())
             j = i + 2
             while j < len(lines):
                 ln = lines[j]
@@ -110,14 +139,21 @@ def doc_params(doc):
                 m = PARAMLINE.match(ln)
                 if m and ln.strip():
                     ind = len(m.group('ind'))
-                    if base_ind is None:
-                        base_ind = ind
+                    # A name written without a colon at all is valid numpydoc
+                    # and is what ibis uses throughout: `case_expr` on one line,
+                    # the description indented under it. To keep a stray word
+                    # from becoming a parameter, such a line counts only when a
+                    # deeper-indented description really follows it.
+                    if ind == base_ind and m.group('type') is None \
+                            and not described_below(lines, j, base_ind):
+                        j += 1
+                        continue
                     if ind == base_ind:
                         names = [n.strip().lstrip('*') for n in m.group('names').split(',')]
                         names = [n for n in names
                                  if re.fullmatch(r'\w+', n) and n not in NOTE_WORDS]
                         if names:
-                            out.append((names, m.group('type'), j))
+                            out.append((names, m.group('type') or '', j))
                 j += 1
             i = j
         else:
@@ -263,10 +299,22 @@ def norm(v):
 
 
 def scan_file(path, repo):
+    """Findings in one file. A file that fails to parse is counted apart.
+
+    Swallowing a `SyntaxError` and counting the file as read makes the report
+    look **cleaner** rather than more worrying. Three files of ESMValCore use
+    syntax newer than the interpreter the run happened on; twelve functions
+    disappeared and the coverage line did not move. Same mechanism as the
+    `.github` directory dropped by a hidden-name mask.
+    """
     try:
         src = path.read_text(encoding='utf-8', errors='ignore')
         tree = ast.parse(src)
+    except SyntaxError:
+        COUNTS["unparsable"] += 1
+        return []
     except Exception:
+        COUNTS["unreadable"] += 1
         return []
     res = []
     parents = {}
@@ -328,12 +376,40 @@ def scan_file(path, repo):
 # --------------------------------------------------------------------------
 
 
-COUNTS: Dict[str, int] = {"files": 0, "funcs": 0, "props": 0, "compat_blind": 0}
+COUNTS: Dict[str, int] = {"files": 0, "funcs": 0, "props": 0, "compat_blind": 0,
+                          "unparsable": 0, "unreadable": 0, "numpydoc_failed": 0}
+
+
+REQUIRES = re.compile(r'requires-python\s*=\s*["\']([^"\']+)', re.I)
+
+
+def interpreter_gap(root: str) -> str:
+    """What the project asks for against what is running this scan.
+
+    A file whose syntax is newer than the interpreter does not parse, and the
+    functions inside it are simply never looked at. On anndata that was 21 files
+    of 39 functions, and the tool used to say nothing at all. Saying it before
+    the run costs one line and saves the whole class.
+    """
+    for name in ("pyproject.toml", "setup.cfg"):
+        text = common.read_text(os.path.join(root, name))
+        m = REQUIRES.search(text or "")
+        if not m:
+            continue
+        v = re.search(r"(\d+)\.(\d+)", m.group(1))
+        if not v:
+            continue
+        want = (int(v.group(1)), int(v.group(2)))
+        have = sys.version_info[:2]
+        if want > have:
+            return (f"project asks for Python {want[0]}.{want[1]}, "
+                    f"this run is {have[0]}.{have[1]}")
+    return ""
 
 
 def scan(root: str) -> List[dict]:
     """Walk the tree. Test files are skipped by name, not only by directory."""
-    COUNTS.update(files=0, funcs=0, props=0, compat_blind=0)
+    COUNTS.update(files=0, funcs=0, props=0, compat_blind=0, unparsable=0, unreadable=0)
     hits: List[dict] = []
     base = pathlib.Path(root)
     name = base.name
@@ -344,8 +420,107 @@ def scan(root: str) -> List[dict]:
             continue
         if p.name.startswith("test_") or p.name.endswith("_test.py") or p.name == "conftest.py":
             continue
-        COUNTS["files"] += 1
         hits.extend(scan_file(p, name))
+        COUNTS["files"] += 1
+    return hits
+
+
+# --------------------------------------------------------------------------
+# Second engine: the reference parser of the format itself
+# --------------------------------------------------------------------------
+
+
+def numpydoc_available() -> bool:
+    try:
+        import numpydoc.docscrape  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def doc_params_numpydoc(doc: str):
+    """The same list, parsed by numpydoc rather than by the rules above.
+
+    numpydoc is the reference implementation of the format, so it is the
+    natural thing to check our own parser against. What it is NOT used for is
+    validation: `numpydoc.validate` imports the module it inspects, and running
+    imports across foreign clones means executing their code. Only the parser
+    is used here, and the signature still comes from `ast`.
+
+    The name it returns keeps a trailing colon (`cube:`), so that gets stripped.
+    """
+    from numpydoc.docscrape import NumpyDocString
+
+    try:
+        parsed = NumpyDocString(doc)
+    except Exception:  # noqa: BLE001
+        COUNTS["numpydoc_failed"] += 1
+        return []
+    out = []
+    for section in ("Parameters", "Other Parameters"):
+        for p in parsed.get(section, []):
+            names = [n.strip().strip(":").lstrip("*") for n in p.name.split(",")]
+            names = [n for n in names if re.fullmatch(r"\w+", n) and n not in NOTE_WORDS]
+            if names:
+                out.append((names, p.type or "", 0))
+    return out
+
+
+def scan_file_numpydoc(path, repo):
+    """Class A only: the reference parser gives no line for a parameter."""
+    try:
+        src = path.read_text(encoding="utf-8", errors="ignore")
+        tree = ast.parse(src)
+    except SyntaxError:
+        COUNTS["unparsable"] += 1
+        return []
+    except Exception:  # noqa: BLE001
+        COUNTS["unreadable"] += 1
+        return []
+    res = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        doc = ast.get_docstring(fn, clean=False)
+        if not doc:
+            continue
+        dp = doc_params_numpydoc(doc)
+        if not dp:
+            continue
+        COUNTS["funcs"] += 1
+        if is_property(fn):
+            COUNTS["props"] += 1
+            continue
+        names, _defaults, star = sig_params(fn)
+        extra, blind = compat_names(fn)
+        if blind:
+            COUNTS["compat_blind"] += 1
+            continue
+        nameset = set(names) | extra | {"self", "cls", "kwargs", "args"}
+        for docnames, typ, _ln in dp:
+            for dn in docnames:
+                if dn not in nameset and not star:
+                    res.append(dict(kind="A", repo=repo, file=str(path), line=fn.lineno,
+                                    func=fn.name, param=dn, sig=names,
+                                    type=(typ or "")[:70], engine="numpydoc"))
+    return res
+
+
+def scan_numpydoc(root: str) -> List[dict]:
+    COUNTS.update(files=0, funcs=0, props=0, compat_blind=0, unparsable=0,
+                  unreadable=0, numpydoc_failed=0)
+    hits: List[dict] = []
+    base = pathlib.Path(root)
+    name = base.name
+    for p in sorted(base.rglob("*.py")):
+        parts = p.relative_to(base).parts
+        if any(x in SKIP_DIRS or (x.startswith(".") and x not in common.KEEP_HIDDEN)
+               for x in parts):
+            continue
+        if p.name.startswith("test_") or p.name.endswith("_test.py") or p.name == "conftest.py":
+            continue
+        hits.extend(scan_file_numpydoc(p, name))
+        COUNTS["files"] += 1
     return hits
 
 
@@ -354,7 +529,8 @@ def is_hard(hit: dict) -> bool:
     return hit.get("kind") == "A"
 
 
-def print_report(hits: List[dict], root: str, verbose: bool = False) -> None:
+def print_report(hits: List[dict], root: str, verbose: bool = False,
+                 engine: str = "rules") -> None:
     hard = [h for h in hits if is_hard(h)]
     soft = [h for h in hits if not is_hard(h)]
 
@@ -375,7 +551,18 @@ def print_report(hits: List[dict], root: str, verbose: bool = False) -> None:
 
     print("\n=== Coverage ===")
     print(f"  tree:                   {root}")
-    print(f"  files read:             {COUNTS['files']}")
+    gap = interpreter_gap(root) if os.path.isdir(root) else ""
+    read_ok = COUNTS['files'] - COUNTS['unparsable'] - COUNTS['unreadable']
+    print(f"  engine:                 {engine}")
+    print(f"  files read:             {read_ok}")
+    # Printed even at zero: a silent parse failure is how a report gets
+    # cleaner instead of more worrying.
+    print(f"  files that failed to parse: {COUNTS['unparsable']}"
+          f" (syntax newer than the running interpreter)")
+    if COUNTS['unreadable']:
+        print(f"  files unreadable:       {COUNTS['unreadable']}")
+    if gap:
+        print(f"  interpreter is older:   {gap}")
     print(f"  functions with Parameters: {COUNTS['funcs']}")
     print(f"  properties skipped:     {COUNTS['props']} (docstring describes what they return)")
     if COUNTS["compat_blind"]:
@@ -388,11 +575,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="numpydoc docstrings against the signature")
     ap.add_argument("root", help="project directory")
     ap.add_argument("name", nargs="?", help="project name for the report")
+    ap.add_argument("--engine", choices=("rules", "numpydoc"), default="rules",
+                    help="rules is the parser written here, numpydoc is the reference one")
     common.add_common_args(ap)
     args = ap.parse_args(argv)
 
-    hits = scan(args.root)
-    print_report(hits, args.name or args.root, args.verbose)
+    if args.engine == "numpydoc" and not numpydoc_available():
+        sys.exit("numpydoc is not installed: pip install numpydoc, or use --engine rules")
+    hits = scan_numpydoc(args.root) if args.engine == "numpydoc" else scan(args.root)
+    print_report(hits, args.name or args.root, args.verbose, args.engine)
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:

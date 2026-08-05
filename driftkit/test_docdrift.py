@@ -454,6 +454,229 @@ def f(alpha=0.01):
         self.assertFalse(any(docdrift.is_hard(x) for x in h))
 
 
+# ------------------------------------------------- coverage, not false findings
+
+
+class TestCoverage(unittest.TestCase):
+    """Two bugs where the tool looked at less than it reported.
+
+    Both were brought in from outside. Neither produced a false finding, which
+    is what makes them expensive: a report that quietly covers less looks
+    cleaner, and cleaner reads as better.
+    """
+
+    def test_section_indent_comes_from_the_heading(self):
+        """The base indent used to come from the first line that matched.
+
+        A description wrapped onto the next line carries its own colon, and a
+        wrapped URL carries one inside `https://`. That line then set the base
+        indent, so `https` became a parameter and every real parameter of the
+        function became invisible. Across the pool: 2654 functions never looked
+        at, ibis 632 of 682, anndata 36 of 39, great-tables 119 of 132.
+        """
+        doc = """Get cube normalized with statistics cube.
+
+    Parameters
+    ----------
+    cube:
+        Input cube that will be normalized.
+    statistics_cube:
+        Cube that is used to normalize the input cube. Needs to be
+        broadcastable to the input cube shape (see also
+        https://scitools-iris.readthedocs.io/en/latest/userguide/cube_maths.
+        html#calculating-a-cube-anomaly).
+    normalize:
+        Normalization operation.
+    """
+        names = [n for group, _t, _l in docdrift.doc_params(doc) for n in group]
+        self.assertEqual(names, ["cube", "statistics_cube", "normalize"])
+        self.assertNotIn("https", names)
+
+    def test_a_name_without_a_type_is_a_parameter(self):
+        """Modern numpydoc for annotated code writes no type: it is in the
+        annotation. Requiring one made the whole function invisible."""
+        h = hard_in('''
+def f(model, n):
+    """Does the thing.
+
+    Parameters
+    ----------
+    MODEL:
+        The model.
+    n:
+        How many.
+    """
+''')
+        self.assertEqual([x["param"] for x in h], ["MODEL"])
+
+    def test_a_name_without_a_colon_is_a_parameter(self):
+        """ibis writes names with no colon at all, description indented under."""
+        doc = """Build a case.
+
+        Parameters
+        ----------
+        case_expr
+            Predicate expression to use for this case.
+        result_expr
+            Value when the case predicate evaluates to true.
+        """
+        names = [n for group, _t, _l in docdrift.doc_params(doc) for n in group]
+        self.assertEqual(names, ["case_expr", "result_expr"])
+
+    def test_a_lone_word_with_no_description_is_no_parameter(self):
+        """The guard against the previous rule going too wide."""
+        doc = """Summary.
+
+    Parameters
+    ----------
+    x : int
+        Number.
+
+    Notes
+    -----
+    Something
+    """
+        names = [n for group, _t, _l in docdrift.doc_params(doc) for n in group]
+        self.assertEqual(names, ["x"])
+
+    def test_a_file_that_fails_to_parse_is_counted_apart(self):
+        """`files read` used to include files where `ast.parse` had raised.
+
+        Three files of ESMValCore use syntax newer than the interpreter of the
+        run; twelve functions vanished and the coverage line did not move.
+        """
+        d = tempfile.mkdtemp()
+        try:
+            # The live case was syntax newer than the interpreter: three files
+            # of ESMValCore on 3.12 with the run on 3.9. Here the syntax is
+            # broken for every interpreter, so the test does not depend on which
+            # one runs it.
+            pathlib.Path(d, "newer.py").write_text(
+                "def f(:\n    return 1\n", encoding="utf-8")
+            pathlib.Path(d, "fine.py").write_text("def g(a):\n    return a\n", encoding="utf-8")
+            docdrift.scan(d)
+            self.assertEqual(docdrift.COUNTS["unparsable"], 1)
+            self.assertEqual(docdrift.COUNTS["files"] - docdrift.COUNTS["unparsable"], 1)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_short_underline_does_not_turn_a_section_into_a_parameter(self):
+        """great-tables writes `Examples` under six dashes instead of eight.
+
+        The reference parser requires the underline to match the header and,
+        failing that, folds the section into Parameters: it reported
+        `Examples`, `Returns`, `Raises` and `ValueError` as documented names.
+        Our own rule takes three dashes or more, so it sees the section.
+        Six of nine findings on that project were this.
+        """
+        d = tempfile.mkdtemp()
+        pathlib.Path(d, "m.py").write_text('''
+def md(text):
+    """Interpret input as Markdown.
+
+    Parameters
+    ----------
+    text
+        The text.
+
+    Examples
+    ------
+    See the docs.
+    """
+''')
+        try:
+            ours = [h["param"] for h in docdrift.scan(d)]
+            self.assertEqual(ours, [], "a section header was taken for a parameter")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+    def test_an_older_interpreter_is_named_before_the_run(self):
+        """anndata asks for 3.12; on 3.9 twenty-one files never parse."""
+        d = tempfile.mkdtemp()
+        try:
+            pathlib.Path(d, "pyproject.toml").write_text(
+                '[project]\nrequires-python = ">=3.99"\n', encoding="utf-8")
+            self.assertIn("3.99", docdrift.interpreter_gap(d))
+            pathlib.Path(d, "pyproject.toml").write_text(
+                '[project]\nrequires-python = ">=3.0"\n', encoding="utf-8")
+            self.assertEqual(docdrift.interpreter_gap(d), "")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------- the second engine: the reference parser
+
+
+class TestNumpydocEngine(unittest.TestCase):
+    """numpydoc parses the docstring instead of the rules written here.
+
+    It is the reference implementation of the format, so it is the natural
+    thing to check our own parser against. What it is NOT used for is
+    `numpydoc.validate`: that imports the module it inspects, and running
+    imports across foreign clones means executing their code.
+    """
+
+    def setUp(self):
+        if not docdrift.numpydoc_available():
+            self.skipTest("numpydoc is not installed")
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, text):
+        pathlib.Path(self.dir, "m.py").write_text(text, encoding="utf-8")
+
+    def test_the_reference_parser_finds_the_same_species(self):
+        self.write('''
+def f(model, n):
+    """Does the thing.
+
+    Parameters
+    ----------
+    MODEL : str
+        The model.
+    n : int
+        How many.
+    """
+''')
+        hits = docdrift.scan_numpydoc(self.dir)
+        self.assertEqual([h["param"] for h in hits], ["MODEL"])
+
+    def test_a_name_without_a_type_is_read(self):
+        """The case that made 2654 functions invisible to our own parser."""
+        self.write('''
+def f(cube, normalize):
+    """Does the thing.
+
+    Parameters
+    ----------
+    cube:
+        Input cube.
+    missing:
+        Not an argument.
+    """
+''')
+        hits = docdrift.scan_numpydoc(self.dir)
+        self.assertEqual([h["param"] for h in hits], ["missing"])
+
+    def test_both_engines_emit_the_same_shape(self):
+        """The refuter and the sweep must not be able to tell them apart."""
+        self.write('''
+def f(model):
+    """Does the thing.
+
+    Parameters
+    ----------
+    MODEL : str
+        The model.
+    """
+''')
+        for h in docdrift.scan_numpydoc(self.dir) + docdrift.scan(self.dir):
+            for key in ("kind", "file", "line", "func", "param", "sig"):
+                self.assertIn(key, h)
+
 # ---------------------------------------------------------------- kit contract
 
 

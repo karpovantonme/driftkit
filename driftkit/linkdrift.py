@@ -131,6 +131,7 @@ class Finding:
 @dataclass
 class Report:
     files: int = 0
+    files_skipped: int = 0
     urls_found: int = 0
     urls_checked: int = 0
     templated: List[str] = dc_field(default_factory=list)
@@ -163,6 +164,10 @@ def collect(root: str, report: Report) -> Dict[str, List[str]]:
                 continue
             text = common.read_text(path)
             if not text:
+                # Empty, unreadable, or over the size limit. Counted rather
+                # than dropped: a file that disappears without a trace makes
+                # the report look cleaner than the run was.
+                report.files_skipped += 1
                 continue
             report.files += 1
             rel = os.path.relpath(path, root)
@@ -317,6 +322,7 @@ def print_report(report: Report, verbose: bool = False) -> None:
 
     print("\n=== Coverage ===")
     print(f"  files read:             {report.files}")
+    print(f"  files skipped:          {report.files_skipped} (empty, unreadable or too large)")
     print(f"  addresses found:        {report.urls_found}")
     print(f"  addresses checked:      {report.urls_checked}")
     print(f"  templated:              {len(report.templated)} (nothing to check)")

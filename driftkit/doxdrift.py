@@ -37,6 +37,30 @@ KNOWN BLIND SPOTS:
   - overloads: when several declarations sit together, the comment is compared
     against the nearest one rather than all of them.
 
+TWO ENGINES. The same findings can be reached two ways, and they are blind in
+different places, which was measured rather than assumed:
+
+  `--engine regex` (the default) reads the header as TEXT. It never asks whether
+      the code compiles, so it runs on any tree, and it cannot tell which
+      declaration a comment belongs to. That is what produced 25 false findings
+      on asio before the family-of-overloads rule.
+
+  `--engine clang` hands the file to the compiler and reads `-Wdocumentation`.
+      It knows the real declaration and even suggests the name that was meant.
+      Missing includes are fatal to the parse, so they get replaced with empty
+      stub headers that accumulate per project; 2233 headers of Boost parsed
+      that way with no build at all. Where a declaration still fails to parse,
+      clang goes **silent** rather than wrong, so it under-reports exactly where
+      the stubs were needed.
+
+Both engines emit the same findings, so the refuter and the sweep cannot tell
+them apart. Divergence between the two is material worth reading: it is the
+cheapest way to catch a bug in either.
+
+A practical use beyond precision: on a project that parses, the report can be
+shown to a maintainer as the output of **their own compiler** rather than of
+somebody's script.
+
 Run:
   python3 doxdrift.py ~/Projects/oss/boost/libs/gil
   python3 doxdrift.py ~/Projects/oss/boost/libs/beast --json out.json
@@ -52,7 +76,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from typing import Dict, List, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -217,7 +244,9 @@ def line_of(text, pos):
 # --------------------------------------------------------------------------
 
 
-COUNTS: Dict[str, int] = {"files": 0, "blocks": 0, "glued": 0}
+COUNTS: Dict[str, int] = {"files": 0, "blocks": 0, "glued": 0, "skipped": 0,
+                          "clang_parsed": 0, "clang_failed": 0, "stubs": 0,
+                          "aliases": 0}
 
 
 def scan_text(src: str, rel: str) -> List[dict]:
@@ -258,7 +287,7 @@ def scan_text(src: str, rel: str) -> List[dict]:
 
 
 def scan(root: str) -> List[dict]:
-    COUNTS.update(files=0, blocks=0, glued=0)
+    COUNTS.update(files=0, blocks=0, glued=0, skipped=0)
     hits: List[dict] = []
     base = pathlib.Path(root)
     for p in sorted(base.rglob('*.hpp')):
@@ -269,13 +298,176 @@ def scan(root: str) -> List[dict]:
         try:
             src = p.read_text(encoding='utf-8', errors='ignore')
         except OSError:
+            COUNTS["skipped"] += 1
             continue
         COUNTS["files"] += 1
         hits.extend(scan_text(src, str(p.relative_to(base))))
     return hits
 
 
-def print_report(hits: List[dict], root: str, verbose: bool = False) -> None:
+# --------------------------------------------------------------------------
+# Second engine: the compiler itself
+# --------------------------------------------------------------------------
+
+CLANG_WARN = re.compile(
+    r"^(?P<file>[^\n:]+):(?P<line>\d+):\d+: warning: "
+    r"(?:parameter|template parameter) '(?P<name>[^']+)' not found in the "
+    r"(?P<where>function|template) declaration \[-Wdocumentation\]", re.M)
+CLANG_MISSING = re.compile(r"'([^']+)' file not found")
+CLANG_SUGGEST = re.compile(r"note: did you mean '([^']+)'\?")
+STUB_ROUNDS = 25          # no Boost tree has needed more than this
+
+
+def clang_available() -> bool:
+    return shutil.which("clang++") is not None
+
+
+def _include_dirs(root: str) -> List[str]:
+    out = []
+    for cand in ("include", "."):
+        p = os.path.join(root, cand)
+        if os.path.isdir(p):
+            out.append(p)
+    return out[:2]
+
+
+def clang_file(path: str, root: str, stubs: str, counts: Dict[str, int]) -> List[dict]:
+    """Findings in one header, taken from the compiler.
+
+    Missing includes are replaced with empty stubs and the stubs accumulate for
+    the whole project: the first header of a Boost library needs about seven,
+    the rest almost none.
+    """
+    args = ["clang++", "-fsyntax-only", "-Wdocumentation", "-ferror-limit=0",
+            "-std=c++17", "-I", stubs]
+    for d in _include_dirs(root):
+        args += ["-I", d]
+    for _ in range(STUB_ROUNDS):
+        try:
+            p = subprocess.run(args + [path], capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            counts["clang_failed"] += 1
+            return []
+        out = p.stderr
+        m = CLANG_MISSING.search(out)
+        if not m:
+            counts["clang_parsed"] += 1
+            return _clang_findings(out, path, root)
+        target = os.path.join(stubs, m.group(1))
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            open(target, "w").close()
+            counts["stubs"] += 1
+        except OSError:
+            counts["clang_failed"] += 1
+            return []
+    counts["clang_failed"] += 1
+    return []
+
+
+ALIAS_AT = re.compile(r"\\t?param_(?P<name>[A-Za-z_]\w*)")
+_ALIASES_SEEN: set = set()
+
+
+def is_project_alias(where: str, line: int, name: str) -> bool:
+    """Is this a Doxygen alias defined by the project rather than a parameter.
+
+    Boost.Geometry writes `\\param geometry \\param_geometry`, where the second
+    word is an alias declared in its own Doxyfile. The compiler knows nothing
+    about a Doxyfile, reads `\\param_geometry` as the command plus a name, and
+    reports a parameter called `_geometry`. On that tree it produced 605
+    warnings, and every one of them was this.
+
+    An alias can carry an argument in braces, `\\param_strategy{Area}`, and the
+    compiler then reports the whole thing as the name. Only the identifier part
+    is compared, so both forms are recognised.
+
+    The signal is exact: the command and the name written with no space between
+    them. A real parameter is always `\\param name`.
+    """
+    if not name.startswith("_"):
+        return False
+    try:
+        with open(where, encoding="utf-8", errors="replace") as fh:
+            text = fh.read().splitlines()
+    except OSError:
+        return False
+    if not 1 <= line <= len(text):
+        return False
+    stem = re.match(r"_?(\w*)", name)
+    stem = stem.group(1) if stem else ""
+    return any(m.group("name") == stem for m in ALIAS_AT.finditer(text[line - 1]))
+
+
+def _clang_findings(out: str, path: str, root: str) -> List[dict]:
+    hits: List[dict] = []
+    lines = out.splitlines()
+    for m in CLANG_WARN.finditer(out):
+        # A warning can arrive from an included header, so the coordinate comes
+        # from the warning itself rather than from the file being compiled.
+        # Counting per compiled file counts mentions instead of entities: on
+        # Boost.Geometry that gave 64,966 instead of 605.
+        where = m.group("file")
+        try:
+            rel = os.path.relpath(where, root)
+        except ValueError:
+            rel = where
+        suggest = ""
+        tail = out[m.end(): m.end() + 400]
+        sm = CLANG_SUGGEST.search(tail)
+        if sm:
+            suggest = sm.group(1)
+        if is_project_alias(where, int(m.group("line")), m.group("name")):
+            # Entities rather than mentions: the same warning arrives from
+            # every file that includes the header.
+            _ALIASES_SEEN.add((where, m.group("line"), m.group("name")))
+            COUNTS["aliases"] = len(_ALIASES_SEEN)
+            continue
+        hits.append(dict(
+            kind="param" if m.group("where") == "function" else "tparam",
+            hard=True, file=rel, line=int(m.group("line")), name=m.group("name"),
+            sig=[suggest] if suggest else [], decl="", engine="clang",
+            note=f"clang suggests `{suggest}`" if suggest else "reported by clang -Wdocumentation",
+        ))
+    seen, uniq = set(), []
+    for h in hits:
+        key = (h["file"], h["line"], h["name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(h)
+    return uniq
+
+
+def scan_clang(root: str) -> List[dict]:
+    """The whole tree through the compiler. Stubs live in a temporary directory."""
+    COUNTS.update(files=0, blocks=0, glued=0, skipped=0,
+                  clang_parsed=0, clang_failed=0, stubs=0, aliases=0)
+    _ALIASES_SEEN.clear()
+    hits: List[dict] = []
+    base = pathlib.Path(root)
+    stubs = tempfile.mkdtemp(prefix="doxdrift-stubs-")
+    seen = set()
+    try:
+        for p in sorted(base.rglob("*.hpp")):
+            parts = p.relative_to(base).parts
+            if any(x in SKIP_DIRS or (x.startswith(".") and x not in common.KEEP_HIDDEN)
+                   for x in parts):
+                continue
+            COUNTS["files"] += 1
+            for h in clang_file(str(p), root, stubs, COUNTS):
+                key = (h["file"], h["line"], h["name"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(h)
+    finally:
+        shutil.rmtree(stubs, ignore_errors=True)
+    return hits
+
+
+def print_report(hits: List[dict], root: str, verbose: bool = False,
+                 engine: str = "regex") -> None:
     par = [h for h in hits if h["kind"] == "param"]
     tpar = [h for h in hits if h["kind"] == "tparam"]
     for title, items in (("Documented \\param missing from the signature", par),
@@ -294,9 +486,17 @@ def print_report(hits: List[dict], root: str, verbose: bool = False) -> None:
 
     print("\n=== Coverage ===")
     print(f"  tree:                   {root}")
+    print(f"  engine:                 {engine}")
     print(f"  headers read:           {COUNTS['files']}")
+    print(f"  headers skipped:        {COUNTS['skipped']} (unreadable)")
     print(f"  blocks with \\param:     {COUNTS['blocks']}")
-    print(f"  family blocks:          {COUNTS['glued']} (a name repeats, cannot judge)")
+    if engine == "clang":
+        print(f"  headers the compiler parsed: {COUNTS['clang_parsed']}")
+        print(f"  headers it could not:   {COUNTS['clang_failed']}")
+        print(f"  stub headers created:   {COUNTS['stubs']} (empty, for missing includes)")
+        print(f"  project aliases skipped:{COUNTS['aliases']} (\\param_name from the project Doxyfile)")
+    else:
+        print(f"  family blocks:          {COUNTS['glued']} (a name repeats, cannot judge)")
     print(common.findings_line(len(hits), 0))
     print(stamp.line(__file__, ["common.py"]))
 
@@ -304,11 +504,15 @@ def print_report(hits: List[dict], root: str, verbose: bool = False) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Doxygen \\param against the C++ signature")
     ap.add_argument("root", help="directory holding the headers")
+    ap.add_argument("--engine", choices=("regex", "clang"), default="regex",
+                    help="regex reads the text, clang asks the compiler")
     common.add_common_args(ap)
     args = ap.parse_args(argv)
 
-    hits = scan(args.root)
-    print_report(hits, args.root, args.verbose)
+    if args.engine == "clang" and not clang_available():
+        sys.exit("clang++ not found: install it or use --engine regex")
+    hits = scan_clang(args.root) if args.engine == "clang" else scan(args.root)
+    print_report(hits, args.root, args.verbose, args.engine)
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
