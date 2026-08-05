@@ -73,6 +73,19 @@ BLOCKED = {401, 402, 403, 405, 429, 503}
 
 TEXT_EXT = (".md", ".rst", ".txt", ".adoc", ".yaml", ".yml", ".json", ".html", ".toml")
 
+# Fixture directories hold saved copies of somebody else's pages, kept so that
+# tests can parse them offline. Every address inside is a historical artefact
+# and none of them is ours to fix. On astroquery a single saved SDSS page
+# produced 57 of 101 findings.
+_FIXTURE_DIR = re.compile(r"(^|/)(tests?|testing)/data/|(^|/)data/tests?/|"
+                          r"(^|/)fixtures?/|(^|/)__snapshots__/", re.I)
+
+# Working addresses printed inside an example of a tool's output: a temporary
+# workspace, a session identifier, a job number. They are generated per run and
+# were never meant to survive. 14 of 101 on astroquery.
+_EPHEMERAL = re.compile(r"/workspace/|TMP_[A-Za-z0-9]{4,}|/tmp/|"
+                        r"[?&](?:session|sid|token|jobid)=", re.I)
+
 _URL = re.compile(r"https?://[^\s\)\]\}\"'`<>,;]+")
 # A template inside the address: nothing to check
 # A single `{` had to be a marker too. `}` is excluded from the address pattern,
@@ -122,6 +135,8 @@ class Report:
     urls_checked: int = 0
     templated: List[str] = dc_field(default_factory=list)
     identifier: List[str] = dc_field(default_factory=list)
+    ephemeral: List[str] = dc_field(default_factory=list)
+    fixture_files: int = 0
     placeholder: List[str] = dc_field(default_factory=list)
     alive: int = 0
     blocked: List[str] = dc_field(default_factory=list)
@@ -143,6 +158,9 @@ def collect(root: str, report: Report) -> Dict[str, List[str]]:
             if not n.lower().endswith(TEXT_EXT):
                 continue
             path = os.path.join(dirpath, n)
+            if _FIXTURE_DIR.search(os.path.relpath(path, root).replace(os.sep, "/")):
+                report.fixture_files += 1
+                continue
             text = common.read_text(path)
             if not text:
                 continue
@@ -165,6 +183,9 @@ def worth_checking(url: str, report: Report) -> bool:
         return False
     if _IDENTIFIER_URI.match(url):
         report.identifier.append(url)
+        return False
+    if _EPHEMERAL.search(url):
+        report.ephemeral.append(url)
         return False
     return True
 
@@ -301,6 +322,8 @@ def print_report(report: Report, verbose: bool = False) -> None:
     print(f"  templated:              {len(report.templated)} (nothing to check)")
     print(f"  illustrative hosts:     {len(report.placeholder)} (localhost, example.com)")
     print(f"  identifier URIs:        {len(report.identifier)} (XML/SAML namespaces, never addresses)")
+    print(f"  ephemeral addresses:    {len(report.ephemeral)} (temporary workspaces, session ids)")
+    print(f"  fixture files skipped:  {report.fixture_files} (saved copies of other people's pages)")
     print(f"  alive:                  {report.alive}")
     print(f"  not let in:             {len(report.blocked)} (403, 401, 429, page is alive)")
     print(f"  unverified:             {len(report.unknown)} (failure repeated, may be our own link)")

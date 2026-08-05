@@ -151,6 +151,26 @@ live parameters, `0` is a plausible default.
 **The rule:** after extracting a name, check that the source line does not
 continue it. The check does not care which character was forgotten.
 
+**The hunt across the rest of the kit.** After the fifth occurrence the species
+was looked for deliberately in every other tool. Nothing new turned up, and the
+reason differs per tool, which is the useful part:
+
+| Tool | Why a truncated value cannot become a false finding |
+|---|---|
+| deaddrift | An explicit guard: if the name continues on the same line, the parse stopped halfway |
+| docdrift | Fixed in case 52: a value ends at a sentence boundary or a comma |
+| linkdrift | Fixed in case 63: a lone `{` marks a template, so a truncated address is recognised rather than checked |
+| namedrift | Safe by construction: insertion and deletion are forbidden shapes, so a prefix can never pair with its own full name |
+| supportdrift | Versions parse whole, `3.10` never becomes `3.1`, and the sort key compares them numerically |
+| doxdrift | A declaration longer than the window produces **silence** rather than a finding: the pattern simply fails to match |
+| gosym, liftdrift | An unterminated declaration ends at the end of file, and a brace inside a string literal does not break the body |
+| ifacedrift | Two names reducing to one key are recorded as ambiguous and never judged |
+
+Two of those are worth reading twice. `doxdrift` and `gosym` do not guard against
+truncation at all; they simply **fail into silence**. That is the failure mode to
+aim for when a guard is hard to write: losing a finding is visible in the
+coverage block, inventing one is not.
+
 ### B. Many mentions of one trouble taken for many troubles
 
 **Cases 1, 14, and the cluster rule in the refuter.** 115 "mismatches" in qdrant
