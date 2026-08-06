@@ -236,6 +236,41 @@ def _is_declarator(inner, decl, close):
     return bool(DECLARATOR.match(inner)) and bool(OPENS_NEXT.match(decl[close + 1:]))
 
 
+def has_unnamed_params(decl):
+    """Does the declaration carry a parameter written as its type alone.
+
+    `void f(bool = false)` and `void f(int, double)` have arguments with no
+    name, so a \\param can never match them. That is a defect in the
+    declaration rather than in the comment, and it is not ours to send.
+    """
+    i = _find_call_paren(decl, _skip_template(decl))
+    if i < 0:
+        return False
+    j = _match_paren(decl, i)
+    if j < 0:
+        return False
+    inner = decl[i + 1:j]
+    if not inner.strip():
+        return False
+    depth, cur, parts = 0, "", []
+    for ch in inner:
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur); cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    for part in parts:
+        head = part.split("=")[0].strip()
+        words = re.findall(r"[A-Za-z_]\w*", head)
+        if len(words) == 1 and words[0] in BUILTIN_TYPES:
+            return True
+    return False
+
+
 def sig_params(decl):
     """Argument identifiers taken from the parentheses of a declaration."""
     # operator() and operator[] carry parentheses inside the name: without this
@@ -376,10 +411,17 @@ def scan_text(src: str, rel: str) -> List[dict]:
         tp = tpl_params(decl)
         ln = line_of(src, m.start())
         if sp is not None:
+            # `void setNonMaxSupression (bool = false)` documents `nonmax` and
+            # the declaration has nowhere to attach it. The docstring is not
+            # wrong; the parameter simply has no name. Fixing that means
+            # editing the signature, which is a code change and not what a
+            # documentation pass should send, so this drops to soft.
+            unnamed = has_unnamed_params(decl)
             for n in pnames:
                 if n not in sp:
-                    hits.append(dict(kind='param', hard=True, file=rel, line=ln, name=n,
-                                     sig=sp, decl=' '.join(decl.split())[:120]))
+                    hits.append(dict(kind='param', hard=not unnamed, file=rel, line=ln,
+                                     name=n, sig=sp, unnamed=unnamed,
+                                     decl=' '.join(decl.split())[:120]))
         if tp:
             for n in tnames:
                 if n not in tp:
@@ -620,7 +662,15 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
     else:
         print(f"  family blocks:          {COUNTS['glued']} (a name repeats, cannot judge)")
         print(f"  function pointers read: {COUNTS['fnptr']} (the name is in parentheses, the arguments follow)")
-    print(common.findings_line(len(hits), 0))
+    # Was `findings_line(len(hits), 0)`: every finding counted as hard, no
+    # matter what the scan decided. The same lie as in the JSON writer, and it
+    # survived because until now there was no soft class to get wrong.
+    hard = sum(1 for h in hits if h.get("hard", True))
+    soft = len(hits) - hard
+    if soft:
+        print(f"  unnamed parameters:     {soft} "
+              f"(the declaration has no name to attach a \\param to)")
+    print(common.findings_line(hard, soft))
     print(stamp.line(__file__, ["common.py"]))
 
 
@@ -638,8 +688,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print_report(hits, args.root, args.verbose, args.engine)
 
     if args.json:
+        # Was `dict(h, hard=True)`, which stamped every finding hard on the way
+        # out and quietly threw away whatever the scan had decided. Harmless
+        # while every finding really was hard; the moment a soft class appeared
+        # it made the report lie.
         with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump([dict(h, hard=True) for h in hits], fh, ensure_ascii=False, indent=1)
+            json.dump([dict(h, hard=bool(h.get("hard", True))) for h in hits],
+                      fh, ensure_ascii=False, indent=1)
     return 1 if any(h.get("hard") for h in hits) else 0
 
 

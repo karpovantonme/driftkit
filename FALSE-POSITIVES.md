@@ -127,6 +127,10 @@ sent to maintainers if nobody had read them.
 | 85 | docdrift | A heading underlined with `==========` instead of dashes | 1 function on networkx, invisible | Either character underlines a heading |
 | 86 | docdrift | The whole block indented one level deeper than its `Parameters` heading | 2 functions on qutip and graphrag, invisible | The indent falls back to the first line after the underline, taken by position |
 | 87 | docdrift | A name documented with no type and no description below it | 1 on statsmodels, invisible | A name ending its section is a name |
+| 96 | doxdrift | Member function pointer, `void (T::*callback)(...)`: the star sits after the qualification, so the declarator pattern missed it | 3 on PCL, reported by darkdi in issue #6 | The star belongs after an optional `Class::`, not before it |
+| 97 | doxdrift | A return type carrying its own call signature: `std::function<void (X)> f(y)` | part of 24 of 28 read by hand on PCL | Nothing inside `<...>` can be an argument list; bracket depth decides |
+| 98 | doxdrift | An unnamed parameter, `void f(bool = false)`: the last word is the type | 3 on PCL | Not a hard finding at all -- the docstring is right, the declaration has no name to attach it to. Dropped to soft |
+| 99 | doxdrift, the reporter | `dict(h, hard=True)` on the way out and `findings_line(len(hits), 0)` in the summary | Invisible while every finding was hard; the moment a soft class appeared both started lying | Report what the scan decided, not what the writer assumed |
 | 89 | doxdrift | A constructor with an initialiser list: `RPA_UKS(Logger& log, const TCMatrix& Mmn) : log_(log), Mmn_(Mmn) {}` | 1 on votca | The argument list ends at the closing bracket, not at the first colon |
 | 90 | doxdrift | A C++20 `requires` clause standing between the template header and the function | 2 on mqt-core | Skip a `requires` clause when looking for the declaration |
 | 91 | doxdrift | The `@file` block at the top of a header read as a function's docstring | 3 on emlearn-micropython | A block with `@file` or `@brief` and no declaration under it belongs to the file |
