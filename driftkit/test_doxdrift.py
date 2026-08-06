@@ -263,11 +263,60 @@ void f(int a);
             self.write(rel, self.DRIFT)
         self.assertEqual(doxdrift.scan(self.dir), [])
 
-    def test_only_hpp_files_are_read(self):
-        """Stated in the header: `.h`, `.cpp` and `.cc` are not read."""
+    def test_headers_are_read_whatever_the_suffix(self):
+        """`.h` counts, and this test used to pin the opposite.
+
+        Until 06.08.2026 the tool globbed `*.hpp` only and this test asserted
+        that a `.h` file yields nothing -- so the test defended the blindness
+        rather than the behaviour. Measured cost: protobuf 6 headers read of
+        611, abseil 0 of 385, and 21 findings invisible across a C++ pool that
+        was already marked as checked.
+        """
+        for rel in ("include/a.h", "include/b.hpp", "include/c.hh",
+                    "include/d.hxx", "include/e.ipp"):
+            self.write(rel, self.DRIFT)
+        self.assertEqual(len(doxdrift.scan(self.dir)), 5)
+
+    def test_sources_are_still_not_read(self):
+        """Declarations live in headers; a .cpp brings definitions and noise."""
         self.write("include/a.cpp", self.DRIFT)
-        self.write("include/a.h", self.DRIFT)
+        self.write("include/a.cc", self.DRIFT)
         self.assertEqual(doxdrift.scan(self.dir), [])
+
+    # ---- declaration shapes reported from the field, issue #6 (PCL) ----
+
+    def test_member_function_pointer_parameter(self):
+        """void (T::*callback)(...) keeps its name between the brackets."""
+        self.assertEqual(
+            doxdrift.sig_params(
+                "template<typename T> CallbackHandle registerImageCallback "
+                "(void (T::*callback)(Image::Ptr, void* cookie), T& instance, "
+                "void* cookie = nullptr) noexcept"),
+            ["callback", "instance", "cookie"])
+
+    def test_return_type_carrying_its_own_call_signature(self):
+        """std::function<void (X)> is a type, not the argument list."""
+        self.assertEqual(
+            doxdrift.sig_params(
+                "template <typename ScalarType> std::function<void (ScalarType)> "
+                "scalarPropertyDefinitionCallback (const std::string& element_name, "
+                "const std::string& property_name)"),
+            ["element_name", "property_name"])
+
+    def test_return_type_with_empty_parentheses(self):
+        """The same shape with nothing inside the brackets of the type."""
+        self.assertEqual(
+            doxdrift.sig_params(
+                "std::tuple<std::function<void ()>, std::function<void ()> > "
+                "elementDefinitionCallback (const std::string& element_name, "
+                "std::size_t count)"),
+            ["element_name", "property_name"][:1] + ["count"])
+
+    def test_unnamed_parameter_is_not_a_name(self):
+        """`bool = false` has no name, so it cannot contradict a \\param."""
+        self.assertEqual(doxdrift.sig_params("void setNonMaxSupression (bool = false)"), [])
+        # and a named one of the same type still reads
+        self.assertEqual(doxdrift.sig_params("void f (bool flag = false)"), ["flag"])
 
     def test_shared_skip_list_is_inherited(self):
         import common

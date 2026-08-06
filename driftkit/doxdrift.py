@@ -32,7 +32,10 @@ for with false findings on Boost:
     before the parse.
 
 KNOWN BLIND SPOTS:
-  - **`.hpp` headers only.** Files `.h`, `.cpp` and `.cc` are not read;
+  - **headers only.** `.hpp .h .hh .hxx .h++ .ipp .inl` are read, `.cpp` and
+    `.cc` are not: declarations live in headers. Until 06.08.2026 only `.hpp`
+    was read, which made every `.h` project report a clean zero -- protobuf 6
+    headers of 611, abseil 0 of 385;
   - declarations longer than 900 characters are cut off. Looking further makes
     no sense, and no finding will come from there either;
   - macros that assemble a whole signature are skipped on purpose (`#define`,
@@ -149,14 +152,47 @@ def _match_paren(decl, i):
     return -1
 
 
+def _angle_depth(decl, upto):
+    """How many unclosed '<' stand before position `upto`.
+
+    Only those that are template brackets: `operator<` and a shift keep their
+    angle brackets in code, so a '<' with an operand on both sides is not a
+    bracket. Cheap approximation, and it is the one that matters here.
+    """
+    depth = 0
+    for k in range(upto):
+        c = decl[k]
+        if c == '<' and (k + 1 >= len(decl) or decl[k + 1] not in '<='):
+            depth += 1
+        elif c == '>' and (k == 0 or decl[k - 1] not in '->'):
+            depth = max(0, depth - 1)
+    return depth
+
+
 def _find_call_paren(decl, start):
-    """The first parenthesis that opens an argument list rather than a macro."""
+    """The first parenthesis that opens an argument list rather than a macro.
+
+    Three things sit in parentheses that are not the argument list, and all
+    three were reported from the field (issue #6, PCL, 24 false findings of 28
+    read by hand):
+
+      - a macro in the return type: BOOST_BEAST_ASYNC_RESULT2(Handler)
+      - a keyword: noexcept(...), alignas(...)
+      - a return type carrying its own call signature:
+        `std::function<void (ScalarType)> f(const std::string& name)`
+
+    The third is the one this reads by bracket depth. Inside `<...>` nothing
+    can be an argument list, because that is a template argument.
+    """
     i = decl.find('(', start)
     while i >= 0:
         head = decl[start:i]
-        if not MACRO_BEFORE_PAREN.search(head) and not KEYWORD_BEFORE_PAREN.search(head):
+        inside_template = _angle_depth(decl, i) > 0
+        if (not inside_template
+                and not MACRO_BEFORE_PAREN.search(head)
+                and not KEYWORD_BEFORE_PAREN.search(head)):
             return i
-        # skip over the whole macro body
+        # skip over the whole macro body, or over the parentheses of a type
         j = _match_paren(decl, i)
         if j < 0:
             return -1
@@ -173,9 +209,20 @@ def _find_call_paren(decl, start):
 # argument named after itself, so every documented argument reads as missing.
 # On opencv that was 111 false findings out of 133, in plugin tables and mouse
 # callbacks. The species lives in every project with a C-compatible interface.
+# `T::*callback` carries no star before the class name, so a pattern demanding
+# [*&] first misses the member-function-pointer spelling entirely: reported
+# from the field as 3 false findings on PCL (issue #6). The star belongs after
+# the optional qualification, not before it.
 DECLARATOR = re.compile(
-    r'^[^(),]*?[*&]\s*(?:[A-Za-z_]\w*\s*::\s*\*\s*)?[A-Za-z_]\w*\s*$')
+    r'^[^(),]*?(?:[A-Za-z_]\w*\s*::\s*)*[*&]\s*[A-Za-z_]\w*\s*$')
 OPENS_NEXT = re.compile(r'\s*\(')
+
+# A parameter written as its type alone has no name to match a \param against.
+BUILTIN_TYPES = frozenset({
+    "void", "bool", "char", "short", "int", "long", "float", "double",
+    "signed", "unsigned", "size_t", "ssize_t", "auto", "wchar_t",
+    "char8_t", "char16_t", "char32_t", "nullptr_t",
+})
 
 
 def _is_declarator(inner, decl, close):
@@ -224,8 +271,11 @@ def sig_params(decl):
     out = []
     for n in names:
         n = n.split('=')[0].strip()
-        # array by reference and function pointer: char(&dest)[N], void(*cb)(int)
-        m2 = re.search(r'\(\s*[&*]\s*([A-Za-z_]\w*)\s*\)', n)
+        # array by reference and function pointer: char(&dest)[N], void(*cb)(int),
+        # and the member spelling void (T::*callback)(...) -- the qualification
+        # sits between the bracket and the star, so it has to be allowed here
+        # too, or the name is read from the pointer's own argument list
+        m2 = re.search(r'\(\s*(?:[A-Za-z_]\w*\s*::\s*)*[&*]\s*([A-Za-z_]\w*)\s*\)', n)
         if m2:
             out.append(m2.group(1)); continue
         # trailing dimensions and bracketed suffixes are dropped
@@ -241,7 +291,19 @@ def sig_params(decl):
         if n.endswith('>') or not n:
             continue
         m = re.findall(r'[A-Za-z_]\w*', n)
-        if m: out.append(m[-1])
+        if not m:
+            continue
+        # An unnamed parameter: `void setNonMaxSupression (bool = false)`. The
+        # last word is the type, so taking it as the name turns a documented
+        # `nonmax` into a mismatch against `bool`. The docstring here is not
+        # wrong -- the declaration simply has nowhere to attach it, and fixing
+        # that means naming the parameter, which is a code change and not
+        # something a docstring pass should send. Reported from the field on
+        # PCL harris_2d/3d/6d (issue #6).
+        if m[-1] in BUILTIN_TYPES and len(m) == 1:
+            COUNTS["unnamed"] = COUNTS.get("unnamed", 0) + 1
+            continue
+        out.append(m[-1])
     return out
 
 def tpl_params(decl):
