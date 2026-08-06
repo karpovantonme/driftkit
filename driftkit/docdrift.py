@@ -31,7 +31,9 @@ KNOWN BLIND SPOTS:
   - defaults computed by an expression rather than written as a literal are
     skipped: `ast.literal_eval` stays quiet on those, which is correct;
   - test, example and documentation directories are not read: docstrings there
-    are written to illustrate, not to describe an API.
+    are written to illustrate, not to describe an API;
+  - a directive switching the check off is read in one form only,
+    `# numpydoc ignore=`. `# noqa` and `# pylint: disable` are not.
 
 Run:
   python3 docdrift.py ~/src/nilearn
@@ -49,7 +51,7 @@ import os
 import pathlib
 import re
 import sys
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,9 +67,16 @@ SKIP_DIRS = common.SKIP_DIRS | {
 
 # A trailing colon after the heading is allowed. pyGSTi writes `Returns:` above
 # the underline, and without this the word itself became a documented parameter.
-SEC = re.compile(r'^\s*(Parameters|Other Parameters|Keyword Arguments)\s*:?\s*$')
-UNDER = re.compile(r'^\s*-{3,}\s*$')
-ANYSEC = re.compile(r'^\s*(Returns?|Yields?|Raises|See Also|Notes?|Examples?|References?|Attributes|Warns|Warnings|Methods|Other Parameters)\s*:?\s*$')
+# Case does not carry meaning in a section heading. numpydoc capitalises every
+# word before comparing, so `See also` is the same heading as `See Also`, and
+# networkx writes it that way throughout. Matching case-sensitively meant the
+# section never closed and its entries went on being read as parameters.
+SEC = re.compile(r'^\s*(Parameters|Other Parameters|Keyword Arguments)\s*:?\s*$', re.I)
+# Either character underlines a heading. networkx writes `==========` under
+# `Parameters` in nx_latex.py, and with dashes only the whole docstring was
+# invisible: no section, no parameters, nothing said about it.
+UNDER = re.compile(r'^\s*(-{3,}|={3,})\s*$')
+ANYSEC = re.compile(r'^\s*(Returns?|Yields?|Raises|See Also|Notes?|Examples?|References?|Attributes|Warns|Warnings|Methods|Other Parameters)\s*:?\s*$', re.I)
 # The type after the colon is optional. Modern numpydoc for annotated code
 # writes none, because the type lives in the annotation:
 #     cube:
@@ -84,11 +93,20 @@ PARAMLINE = re.compile(
 # as a flag name truncated mid-word.
 DEFAULT_IN_TYPE = re.compile(
     r'(?:default[\s:=]+|defaults to\s+)(?P<val>[^,;)\]]+?)(?=\.\s|[,;)\]]|$)', re.I)
-EXAMPLES = re.compile(r'^\s*Examples?\s*:?\s*$')
+EXAMPLES = re.compile(r'^\s*Examples?\s*:?\s*$', re.I)
 # Notes inside a Parameters section parse as arguments: the line
 # `TODO: looks like not used yet` is shaped exactly like `name : type`.
 # Seen in the wild in statsmodels, `gradient_momcond`.
 NOTE_WORDS = frozenset({"TODO", "FIXME", "XXX", "HACK", "NOTE", "NB", "BUG", "WARNING"})
+# `None` written alone under Parameters is how a docstring says the function
+# takes none, and mne uses it. It cannot be an argument name in any case: these
+# are keywords, so the rule is exact rather than a guess.
+NOT_A_NAME = frozenset({"None", "True", "False"})
+
+
+def is_note(word: str) -> bool:
+    """A placeholder rather than an argument name. pyGSTi writes `todo` in lower case."""
+    return word.upper() in NOTE_WORDS or word in NOT_A_NAME
 
 
 def cut_at_examples(lines):
@@ -116,6 +134,44 @@ def described_below(lines, idx: int, base_ind: int) -> bool:
     return False
 
 
+def block_indent(lines, head: int) -> int:
+    """The indent parameter names sit at, which is usually the heading's own.
+
+    Usually, but not always: qutip and graphrag indent the whole block one
+    level deeper than the `Parameters` heading above it, and then nothing sits
+    at the heading's indent and the function goes unread. The fallback is the
+    indent of the FIRST line after the underline, taken by position rather than
+    by what it contains. Taking it from the first line that happened to match a
+    pattern is the mistake that cost 2654 functions across the pool, so the
+    rule stays deterministic.
+    """
+    base = len(lines[head]) - len(lines[head].lstrip())
+    for k in range(head + 2, len(lines)):
+        ln = lines[k]
+        if not ln.strip():
+            continue
+        ind = len(ln) - len(ln.lstrip())
+        return base if ind <= base else ind
+    return base
+
+
+def section_ends_below(lines, idx: int) -> bool:
+    """Is this line the last of the section: only a boundary follows.
+
+    A name written with no type and no description is valid numpydoc, and
+    `archive/gam.py` in statsmodels documents `tol` that way on a method that
+    does not take it. Requiring a description below made it invisible to us
+    while the reference parser saw it, and a divergence between two engines is
+    exactly what they exist to surface.
+    """
+    for k in range(idx + 1, len(lines)):
+        ln = lines[k]
+        if not ln.strip():
+            continue
+        return bool(ANYSEC.match(ln) or SEC.match(ln))
+    return True
+
+
 def doc_params(doc):
     """-> [(names, type string, line number inside the docstring)]
 
@@ -132,7 +188,7 @@ def doc_params(doc):
     out, i = [], 0
     while i < len(lines) - 1:
         if SEC.match(lines[i]) and UNDER.match(lines[i + 1]):
-            base_ind = len(lines[i]) - len(lines[i].lstrip())
+            base_ind = block_indent(lines, i)
             j = i + 2
             while j < len(lines):
                 ln = lines[j]
@@ -147,13 +203,14 @@ def doc_params(doc):
                     # from becoming a parameter, such a line counts only when a
                     # deeper-indented description really follows it.
                     if ind == base_ind and m.group('type') is None \
-                            and not described_below(lines, j, base_ind):
+                            and not described_below(lines, j, base_ind) \
+                            and not section_ends_below(lines, j):
                         j += 1
                         continue
                     if ind == base_ind:
                         names = [n.strip().lstrip('*') for n in m.group('names').split(',')]
                         names = [n for n in names
-                                 if re.fullmatch(r'\w+', n) and n not in NOTE_WORDS]
+                                 if re.fullmatch(r'\w+', n) and not is_note(n)]
                         if names:
                             out.append((names, m.group('type') or '', j))
                 j += 1
@@ -220,6 +277,49 @@ def compat_names(fn) -> Tuple[set, bool]:
         if not found:
             blind = True
     return names, blind
+
+
+# --------------------------------------------------------------------------
+# Places the author marked as excluded from checking
+# --------------------------------------------------------------------------
+#
+# numpydoc lets an author switch a check off where it does not apply, by a
+# comment inside the signature:
+#
+#     def apply_where(  # type: ignore[explicit-any] # numpydoc ignore=PR01,PR02
+#         cond, args, f1, f2=None, /, *, fill_value=None
+#     ):
+#
+# `PR02` is "unknown parameters", which is class A word for word. In
+# statsmodels the documented `xp` is deliberate and the author said so in the
+# source; reporting it means telling a maintainer something they already
+# decided. The directive is read exactly: only a code list containing PR02, or
+# a directive with no codes at all, silences class A. `EX01` and its kind are
+# about other checks and leave this one judging.
+SUPPRESS = re.compile(
+    r"#\s*numpydoc\s+ignore\s*(?:=\s*(?P<codes>[A-Z]{2}\d{2}(?:\s*,\s*[A-Z]{2}\d{2})*))?")
+# The class A code and the blanket ones, which cover every check at once.
+SUPPRESS_CODES = frozenset({"PR02", "GL08"})
+
+
+def author_switched_off(lines: List[str], fn) -> bool:
+    """Did the author disable the parameter check on this function.
+
+    The directive lives anywhere in the signature, from `def` to the line above
+    the docstring, because that is where numpydoc itself reads it from.
+    """
+    first = fn.lineno - 1
+    last = fn.body[0].lineno - 1 if fn.body else first + 1
+    for ln in lines[first:max(last, first + 1)]:
+        m = SUPPRESS.search(ln)
+        if not m:
+            continue
+        codes = m.group("codes")
+        if not codes:
+            return True
+        if {c.strip() for c in codes.split(",")} & SUPPRESS_CODES:
+            return True
+    return False
 
 
 def is_property(fn) -> bool:
@@ -318,6 +418,7 @@ def scan_file(path, repo):
     except Exception:
         COUNTS["unreadable"] += 1
         return []
+    lines = src.split("\n")
     res = []
     parents = {}
     for n in ast.walk(tree):
@@ -336,6 +437,9 @@ def scan_file(path, repo):
         # 41 of the 44 hard findings on networkx were this.
         if is_property(fn):
             COUNTS["props"] += 1
+            continue
+        if author_switched_off(lines, fn):
+            COUNTS["suppressed"] += 1
             continue
         dp = doc_params(doc)
         if not dp:
@@ -379,7 +483,8 @@ def scan_file(path, repo):
 
 
 COUNTS: Dict[str, int] = {"files": 0, "funcs": 0, "props": 0, "compat_blind": 0,
-                          "unparsable": 0, "unreadable": 0, "numpydoc_failed": 0}
+                          "unparsable": 0, "unreadable": 0, "numpydoc_failed": 0,
+                          "suppressed": 0}
 
 
 REQUIRES = re.compile(r'requires-python\s*=\s*["\']([^"\']+)', re.I)
@@ -411,7 +516,8 @@ def interpreter_gap(root: str) -> str:
 
 def scan(root: str) -> List[dict]:
     """Walk the tree. Test files are skipped by name, not only by directory."""
-    COUNTS.update(files=0, funcs=0, props=0, compat_blind=0, unparsable=0, unreadable=0)
+    COUNTS.update(files=0, funcs=0, props=0, compat_blind=0, unparsable=0,
+                  unreadable=0, suppressed=0)
     hits: List[dict] = []
     base = pathlib.Path(root)
     name = base.name
@@ -438,6 +544,22 @@ def numpydoc_available() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return True
+
+
+def split_names(head: str) -> List[str]:
+    """`a, b, c` is three names; a sentence that happens to contain commas is none.
+
+    The reference parser puts a whole line into the name whenever the line does
+    not look like a declaration, and a Parameters section often holds prose:
+    "Must contain ECoG, sEEG or DBS channels", a citation list, "int, required".
+    Splitting that on commas produced names like `ECoG`, `Gilbert` and
+    `required`. A comma-separated list is only taken when EVERY piece of it is
+    a bare identifier, which is what a real one always is.
+    """
+    parts = [n.strip().lstrip("*") for n in head.split(",")]
+    if not all(re.fullmatch(r"\w+", n) for n in parts):
+        return []
+    return [n for n in parts if not is_note(n)]
 
 
 def doc_params_numpydoc(doc: str):
@@ -467,8 +589,7 @@ def doc_params_numpydoc(doc: str):
     for section in ("Parameters", "Other Parameters"):
         for p in parsed.get(section, []):
             head = p.name.split(":", 1)[0]
-            names = [n.strip().lstrip("*") for n in head.split(",")]
-            names = [n for n in names if re.fullmatch(r"\w+", n) and n not in NOTE_WORDS]
+            names = split_names(head)
             if names:
                 out.append((names, p.type or "", 0))
     return out
@@ -485,6 +606,7 @@ def scan_file_numpydoc(path, repo):
     except Exception:  # noqa: BLE001
         COUNTS["unreadable"] += 1
         return []
+    lines = src.split("\n")
     res = []
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -498,6 +620,9 @@ def scan_file_numpydoc(path, repo):
         COUNTS["funcs"] += 1
         if is_property(fn):
             COUNTS["props"] += 1
+            continue
+        if author_switched_off(lines, fn):
+            COUNTS["suppressed"] += 1
             continue
         names, _defaults, star = sig_params(fn)
         extra, blind = compat_names(fn)
@@ -516,7 +641,7 @@ def scan_file_numpydoc(path, repo):
 
 def scan_numpydoc(root: str) -> List[dict]:
     COUNTS.update(files=0, funcs=0, props=0, compat_blind=0, unparsable=0,
-                  unreadable=0, numpydoc_failed=0)
+                  unreadable=0, numpydoc_failed=0, suppressed=0)
     hits: List[dict] = []
     base = pathlib.Path(root)
     name = base.name
@@ -573,6 +698,9 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
         print(f"  interpreter is older:   {gap}")
     print(f"  functions with Parameters: {COUNTS['funcs']}")
     print(f"  properties skipped:     {COUNTS['props']} (docstring describes what they return)")
+    # Printed even at zero, like every other line here: a dismissal nobody sees
+    # is how a report gets cleaner instead of more honest.
+    print(f"  author switched it off: {COUNTS['suppressed']} (`# numpydoc ignore=PR02` in the signature)")
     if COUNTS["compat_blind"]:
         print(f"  opaque decorator:       {COUNTS['compat_blind']} (cannot tell which extra names it accepts)")
     print(common.findings_line(len(hard), len(soft)))

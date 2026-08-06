@@ -118,6 +118,16 @@ sent to maintainers if nobody had read them.
 | 76 | docdrift | A section heading written `Returns:` with a trailing colon was not recognised, and the word fell through to the parameter rule | 10 across the pool | A trailing colon after a heading is allowed |
 | 77 | docdrift, numpydoc engine | Without a blank line before `Parameters` the reference parser sees no section at all | 1 known, unknown in general | Recorded rather than fixed: our own rule is the forgiving one here |
 | 78 | doxdrift | A macro carrying the default of a template parameter: `class Options BOOST_CONTAINER_DOCONLY(= void)` | every `\tparam` in Boost.Container | The trailing uppercase macro is stripped before the name is taken; the same guard already stood over function arguments |
+| 79 | doxdrift | A function pointer keeps its name in parentheses: `CvResult (CV_API_CALL *Capture_open)(...)` | **111 of 133** on opencv | The first pair is a declarator when a second pair follows it |
+| 80 | docdrift | A directive switching the check off in place: `# numpydoc ignore=PR01,PR02` | 1 on statsmodels | The code list is read; PR02 is class A word for word |
+| 81 | docdrift | `See also` in lower case did not close the section, so its entry read as a parameter | 1 on networkx | Section headings compare without case, as they do in numpydoc |
+| 82 | docdrift | A placeholder written `todo` rather than `TODO` | 1 on pyGSTi | Note words compare without case |
+| 83 | docdrift | `None` written alone under Parameters, meaning there are none | 1 on mne-python | `None`, `True` and `False` are keywords and cannot be an argument name |
+| 84 | the adapter to numpydoc | A sentence split on commas: "Must contain ECoG, sEEG or DBS channels", a citation list, `int, required` | 22 across the pool | A comma-separated list is taken only when every piece is a bare identifier |
+| 85 | docdrift | A heading underlined with `==========` instead of dashes | 1 function on networkx, invisible | Either character underlines a heading |
+| 86 | docdrift | The whole block indented one level deeper than its `Parameters` heading | 2 functions on qutip and graphrag, invisible | The indent falls back to the first line after the underline, taken by position |
+| 87 | docdrift | A name documented with no type and no description below it | 1 on statsmodels, invisible | A name ending its section is a name |
+| 88 | numpydoc, the reference parser | With no blank line before `Returns` the two sections run together and `Returns` becomes a parameter | 40 or so across the pool | Recorded rather than fixed: our own rule is the exact one here |
 
 Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
 
@@ -125,7 +135,27 @@ Cases 62 to 64 were reported from outside, by [@darkdi](https://github.com/darkd
 
 Case 63 deserves a note. `}` is excluded from the address pattern, so `https://login.microsoftonline.com/{tenant}/saml2` was captured as `https://login.microsoftonline.com/{tenant`, and that stump then returned 404 honestly. This is the same species as cases 26, 28 and 32 in this table: a value cut short by a parser matching something real. Fourth occurrence, different tool, different language.
 
-Seventy-eight worked cases. None invented: every one turned up on a live project.
+Eighty-eight worked cases. None invented: every one turned up on a live project.
+
+Cases 81 to 84 turned up in a particular way worth naming. Case 87 is a blind
+spot, and lifting it meant relaxing a guard; the measurement run with the guard
+relaxed surfaced four findings across the pool, of which **one was the blind
+spot and three were new species of false one**. So the three were fixed first
+and the guard lifted afterwards, and the pool then moved by exactly one finding.
+Relaxing a rule and measuring what falls out of it is cheaper than arguing about
+where the rule should sit.
+
+Case 79 is the largest single species this kit has met in C++ and it had simply
+never come up: the old pool was Boost and scientific code, where a C-compatible
+plugin interface is rare. One new project of a different kind put 111 false
+findings on the table at once.
+
+The `\cond` region is the C++ construct closest to case 80, and it was measured
+on 6 August 2026: 140 headers of the pool use it, and **none** of the 49 findings
+standing at that moment sat inside one. No rule was added, and the reason is that
+the two constructs do not mean the same thing. A numpydoc directive says do not
+check here; `\cond` says do not publish this. A mismatch inside a `\cond` region
+is still a mismatch in the source.
 
 The numeric summary of cases 50 to 55 is worth stating on its own, because it
 shows the price of reading. Five scientific Python projects, networkx, pyTMD,
@@ -336,10 +366,16 @@ difference is a convention rather than a claim.
 
 ### H. A deliberate omission taken for a defect
 
-**Cases 17, 20, 29, 31.** Mutexes are not copied, `go.mod` promises nothing about
-CI, a deprecated option still works, a removed scenario is not a removed option.
+**Cases 17, 20, 29, 31, 80, 83.** Mutexes are not copied, `go.mod` promises
+nothing about CI, a deprecated option still works, a removed scenario is not a
+removed option, `# numpydoc ignore=PR02` switches the check off in place, `None`
+under Parameters means there are none.
 
-**The rule:** ask what the author meant before calling it a defect.
+**The rule:** ask what the author meant before calling it a defect. In its
+sharpest form the author has written the answer down in the source, and case 80
+is that form: a directive naming the very check we are running. Reading it costs
+one regular expression, and not reading it means telling a maintainer something
+they decided on purpose.
 
 ### I. The tool hides the real thing
 
@@ -433,7 +469,7 @@ is clean.
 |---|---|
 | Languages | Declarations are parsed for Go (a custom parser), Python (`ast`) and C++ (regular expressions). Rust, Java and TypeScript are not parsed at all |
 | Documentation formats | numpydoc and Doxygen only. Google style, JSDoc and rustdoc are not read |
-| Builds | No tool builds a project. The whole "promise against behaviour" family is out of reach |
+| Builds | `racedrift` runs a Go suite under the race detector, and only on a runner. The C++ and Python halves of that family are not written |
 | Spec formats | OpenAPI 3 and Swagger 2. GraphQL, AsyncAPI and gRPC-web were never tried |
 | Changelogs | The etcd, rclone and nf-core forms are worked out. "Keep a Changelog" with nested lists was never checked |
 | Translations | Checked on Hugo with `default_lang_commit`. Docusaurus, Sphinx and MkDocs were never tried |
@@ -443,6 +479,8 @@ is clean.
 | Review language | The lesson harvester understands rejection in English only. Chinese and Japanese projects will yield zero lessons and say nothing about it |
 | Rejections | Across 61 of our pull requests there is **not one rejection** yet. So the rejection language is tested on invented examples rather than live ones |
 | Form of rejection | A maintainer may close a pull request silently or with one word. The tool will not see that: there is no text to take a reason from |
+| Suppression directives | `# numpydoc ignore` is read. `# noqa`, `# pylint: disable`, `// NOLINT` and `\cond` are not, and only the last of them was measured |
+| C declarations | A function pointer is parsed since case 79. An array by reference at declaration level, `char (&buf)[N]`, is still read as an argument list |
 
 ---
 

@@ -770,5 +770,289 @@ def f(model):
         self.assertTrue(common.SKIP_DIRS <= docdrift.SKIP_DIRS)
 
 
+class TestAuthorSwitchedItOff(unittest.TestCase):
+    """A directive in the source saying this check does not apply here.
+
+    statsmodels writes `# numpydoc ignore=PR01,PR02` on `apply_where`, where
+    PR02 is "unknown parameters" word for word. The documented `xp` is
+    deliberate and the author said so in the code; reporting it means telling a
+    maintainer something they have already decided.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, rel, text):
+        p = pathlib.Path(self.dir, rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    BODY = '''"""
+    Run one of two functions.
+
+    Parameters
+    ----------
+    cond : array
+        The condition.
+    xp : array_namespace, optional
+        The standard-compatible namespace.
+    """
+    return cond
+'''
+
+    def test_the_directive_dismisses_the_finding(self):
+        self.write("pkg/m.py",
+                   "def apply_where(  # type: ignore[explicit-any] # numpydoc ignore=PR01,PR02\n"
+                   "    cond, /, *, fill_value=None\n"
+                   "):\n    " + self.BODY)
+        self.assertEqual(docdrift.scan(self.dir), [])
+        self.assertEqual(docdrift.COUNTS["suppressed"], 1)
+
+    def test_a_directive_about_another_check_leaves_this_one_judging(self):
+        """`EX01` is about missing examples and says nothing about parameters.
+
+        Reading any directive as "stay quiet about everything" is how a rule
+        stops being exact and starts hiding real findings.
+        """
+        self.write("pkg/m.py",
+                   "def apply_where(  # numpydoc ignore=EX01,SA01\n"
+                   "    cond, /, *, fill_value=None\n"
+                   "):\n    " + self.BODY)
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["xp"])
+
+    def test_a_directive_with_no_codes_covers_everything(self):
+        self.write("pkg/m.py",
+                   "def apply_where(cond):  # numpydoc ignore\n    " + self.BODY)
+        self.assertEqual(docdrift.scan(self.dir), [])
+
+    def test_a_directive_below_the_docstring_is_not_read(self):
+        """It has to sit in the signature, which is where numpydoc reads it."""
+        self.write("pkg/m.py",
+                   "def apply_where(cond):\n    " + self.BODY.rstrip("\n") +
+                   "  # numpydoc ignore=PR02\n")
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["xp"])
+
+    def test_the_count_is_printed_even_at_zero(self):
+        """A dismissal nobody sees is how a report gets cleaner, not more honest."""
+        import io
+        from contextlib import redirect_stdout
+        self.write("pkg/m.py", "def f(a):\n    return a\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            docdrift.print_report(docdrift.scan(self.dir), self.dir)
+        self.assertIn("author switched it off: 0", buf.getvalue())
+
+    @unittest.skipUnless(docdrift.numpydoc_available(), "numpydoc not installed")
+    def test_both_engines_read_the_same_directive(self):
+        """Two engines that disagree about a dismissal cannot be compared."""
+        self.write("pkg/m.py",
+                   "def apply_where(  # numpydoc ignore=PR01,PR02\n"
+                   "    cond, /, *, fill_value=None\n"
+                   "):\n    " + self.BODY)
+        self.assertEqual(docdrift.scan_numpydoc(self.dir), [])
+
+
+class TestWhereTheTwoEnginesDisagreed(unittest.TestCase):
+    """Every rule here came out of one engine seeing what the other did not.
+
+    Run across the whole Python pool on 6 August 2026, our own parser and
+    numpydoc disagreed on 22 findings that were not the reference parser
+    swallowing a section heading. Reading them by hand gave four species, three
+    of them ours.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, rel, text):
+        p = pathlib.Path(self.dir, rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_a_heading_underlined_with_equals(self):
+        """networkx writes `==========` in nx_latex.py, and we saw no section."""
+        self.write("pkg/m.py", '''
+def to_latex(Gbunch, pos):
+    """Draw it.
+
+    Parameters
+    ==========
+    Gbunch : NetworkX graph
+        The graph.
+    sub_latex_labels : dict
+        Labels for the subfigures.
+    """
+    return Gbunch
+''')
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["sub_latex_labels"])
+
+    def test_a_block_indented_deeper_than_its_heading(self):
+        """qutip and graphrag indent the whole block one level in.
+
+        Nothing then sits at the heading's indent, and every parameter of the
+        function went unread while the report counted the file as checked.
+        """
+        self.write("pkg/m.py", '''
+def plot_energy_levels(H_list, N=0):
+    """Plot it.
+
+    Parameters
+    ----------
+
+        H_list : List of Qobj
+            A list of Hamiltonians.
+
+        h_lables : List of string, optional
+            A list of xticklabels for each Hamiltonian
+    """
+    return H_list
+''')
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["h_lables"])
+
+    def test_the_heading_indent_still_wins_when_something_sits_at_it(self):
+        """The fallback is a fallback: an ordinary docstring must not move."""
+        self.write("pkg/m.py", '''
+def f(a):
+    """Do it.
+
+    Parameters
+    ----------
+    a : int
+        The one.
+    b : int
+        The other.
+    """
+    return a
+''')
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["b"])
+
+    def test_a_lower_case_section_heading_closes_the_section(self):
+        """networkx writes `See also`, and the entry under it became a parameter."""
+        self.write("pkg/m.py", '''
+def gnm_random_graph(n, m):
+    """Make it.
+
+    Parameters
+    ----------
+    n : int
+        Nodes.
+    m : int
+        Edges.
+
+    See also
+    --------
+    dense_gnm_random_graph
+
+    """
+    return n
+''')
+        self.assertEqual(docdrift.scan(self.dir), [])
+
+    def test_a_placeholder_in_lower_case_is_no_parameter(self):
+        """pyGSTi writes `todo` where the parameters should be."""
+        self.write("pkg/m.py", '''
+def lsp(x, times):
+    """Do it.
+
+    Parameters
+    ----------
+    todo
+
+    Returns
+    -------
+    todo
+    """
+    return x
+''')
+        self.assertEqual(docdrift.scan(self.dir), [])
+
+    def test_none_written_alone_means_there_are_no_parameters(self):
+        """mne writes `None` under Parameters, and it cannot be a name anyway."""
+        self.write("pkg/m.py", '''
+def load_geometry(self):
+    """Load it.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    return 1
+''')
+        self.assertEqual(docdrift.scan(self.dir), [])
+
+    def test_a_name_with_no_description_at_the_end_of_the_section(self):
+        """statsmodels documents `tol` alone, and we used to need a description."""
+        self.write("pkg/m.py", '''
+def cont(self):
+    """Continue.
+
+    Parameters
+    ----------
+    tol
+
+    Returns
+    -------
+    cont : bool
+        Whether to go on.
+    """
+    return True
+''')
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["tol"])
+
+    def test_a_stray_word_in_the_middle_is_still_no_parameter(self):
+        """The guard that was relaxed has to keep holding where it was needed."""
+        self.write("pkg/m.py", '''
+def f(a):
+    """Do it.
+
+    Parameters
+    ----------
+    a : int
+        The one.
+    stray
+    b : int
+        The other.
+    """
+    return a
+''')
+        self.assertEqual([h["param"] for h in docdrift.scan(self.dir)], ["b"])
+
+
+class TestAdapterToTheReferenceParser(unittest.TestCase):
+    """The reference parser puts prose in the name field, and we split it.
+
+    Second time in two days: case 75 was a name split on commas without cutting
+    at the colon, this is a sentence split on commas. The tool that reads
+    another tool is a tool, and it is wrong in the same species.
+    """
+
+    def test_a_sentence_is_not_a_list_of_names(self):
+        self.assertEqual(
+            docdrift.split_names("Must contain ECoG, sEEG or DBS channels"), [])
+
+    def test_a_citation_list_is_not_a_list_of_names(self):
+        self.assertEqual(
+            docdrift.split_names("Gilbert, Elmer G., Daniel W. Johnson"), [])
+
+    def test_a_real_list_of_names_still_splits(self):
+        self.assertEqual(docdrift.split_names("copy, deep, inplace"),
+                         ["copy", "deep", "inplace"])
+
+    def test_a_single_name_survives(self):
+        self.assertEqual(docdrift.split_names("random_state"), ["random_state"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

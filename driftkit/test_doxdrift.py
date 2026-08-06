@@ -421,5 +421,94 @@ Iter search(Iter corpus_first, Iter corpus_last) { return corpus_first; }
         self.assertIn("stub headers created", text)
 
 
+class TestFunctionPointer(unittest.TestCase):
+    """The name lives inside parentheses and the arguments in the next pair.
+
+    On opencv this species alone gave 111 false findings out of 133: plugin
+    tables and mouse callbacks are written this way, and every documented
+    argument of every one of them read as missing.
+    """
+
+    FIELD = """
+/** @brief Open video capture
+@param filename File name or NULL
+@param camera_index Camera index
+@param handle pointer on Capture handle
+*/
+CvResult (CV_API_CALL *Capture_open)(const char* filename, int camera_index,
+                                     CV_OUT CvPluginCapture* handle);
+"""
+    TYPEDEF = """
+/** @brief Callback function for mouse events.
+@param event one of the cv::MouseEventTypes constants.
+@param x The x-coordinate of the mouse event.
+@param y The y-coordinate of the mouse event.
+@param flags one of the cv::MouseEventFlags constants.
+@param userdata The optional parameter.
+*/
+typedef void (*MouseCallback)(int event, int x, int y, int flags, void* userdata);
+"""
+
+    def test_a_field_of_a_plugin_table_is_read(self):
+        self.assertEqual(doxdrift.scan_text(self.FIELD, "plugin_api.hpp"), [])
+
+    def test_a_callback_typedef_is_read(self):
+        self.assertEqual(doxdrift.scan_text(self.TYPEDEF, "highgui.hpp"), [])
+
+    def test_the_calling_convention_macro_does_not_become_the_name(self):
+        self.assertEqual(
+            doxdrift.sig_params(
+                "CvResult (CV_API_CALL *Capture_open)(const char* filename, int camera_index)"),
+            ["filename", "camera_index"])
+
+    def test_a_pointer_to_a_member_function(self):
+        self.assertEqual(
+            doxdrift.sig_params("void (Widget::*handler)(int event, bool down)"),
+            ["event", "down"])
+
+    def test_an_ordinary_function_with_one_pointer_argument_is_untouched(self):
+        """`void f(int *x)` looks like a declarator from the inside.
+
+        What tells them apart is that a declarator is always followed by the
+        argument list. Without that second condition this fix would have made
+        every single-pointer-argument function invisible, which is the more
+        expensive mistake of the two.
+        """
+        self.assertEqual(doxdrift.sig_params("void f(int *x)"), ["x"])
+        self.assertEqual(doxdrift.sig_params("void f(int &x)"), ["x"])
+
+    def test_a_real_mismatch_in_a_callback_is_still_reported(self):
+        """The fix must not silence the species it was meant to parse."""
+        src = ("/** @brief cb\n@param nosuch nothing\n*/\n"
+               "typedef void (*MouseCallback)(int event, int x);\n")
+        hits = doxdrift.scan_text(src, "a.hpp")
+        self.assertEqual([h["name"] for h in hits], ["nosuch"])
+        self.assertEqual(hits[0]["sig"], ["event", "x"])
+
+    def test_they_are_counted_in_the_coverage_block(self):
+        doxdrift.COUNTS["fnptr"] = 0
+        doxdrift.scan_text(self.TYPEDEF, "a.hpp")
+        self.assertEqual(doxdrift.COUNTS["fnptr"], 1)
+
+
+class TestSuppressionMeasured(unittest.TestCase):
+    """`\\cond` is the C++ construct closest to a numpydoc ignore directive.
+
+    Measured rather than assumed, on 6 August 2026: 140 headers of the pool use
+    `\\cond`, and none of the 49 findings standing at that moment sat inside
+    such a region. No rule was added, and the reason is that the two constructs
+    do not mean the same thing: a numpydoc directive says **do not check here**,
+    while `\\cond` says **do not publish this**. A mismatch inside a `\\cond`
+    region is still a real mismatch in the source.
+    """
+
+    def test_a_finding_inside_cond_is_still_reported(self):
+        src = ("/// \\cond INTERNAL\n"
+               "/// Does the thing.\n/// \\param nosuch nothing\n"
+               "void f(int real) {}\n"
+               "/// \\endcond\n")
+        self.assertEqual([h["name"] for h in doxdrift.scan_text(src, "a.hpp")], ["nosuch"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

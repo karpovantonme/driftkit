@@ -2,7 +2,7 @@
 
 The tools here find real defects, and they find them fast. That is exactly what makes them easy to misuse: a checker plus an agent can open twenty pull requests in an afternoon, and twenty pull requests in an afternoon is what gets a maintainer to close all of them without reading.
 
-This happened to us on 2026-08-05. Two people ran the same checker against the same project a day apart, both fixes were correct, and the maintainer closed both — citing the volume, not the content. Nobody did anything wrong except fail to coordinate.
+This happened to us on 2026-08-05. Two people ran the same checker against the same project a day apart, both fixes were correct, and the maintainer closed both, citing the volume rather than the content. Nobody did anything wrong except fail to coordinate.
 
 So: the license is MIT and you can do what you like. What follows is not a licence term, it is what we have learned works.
 

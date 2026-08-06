@@ -23,7 +23,11 @@ for with false findings on Boost:
   - `operator()` and `operator[]` carry parentheses inside the name itself;
   - `decltype(auto)`, `noexcept(...)` and `sizeof(...)` are no argument lists;
   - an array by reference `char(&dest)[N]` and a function pointer `void(*cb)(int)`
-    hide the name inside parentheses;
+    hide the name inside parentheses, as an argument and as a declaration alike:
+    `CvResult (CV_API_CALL *Capture_open)(const char* filename)` keeps its name
+    in the first pair of parentheses and its arguments in the second, and
+    reading the first pair as the argument list cost 111 false findings out of
+    133 on opencv;
   - preprocessor directives together with their `\\` continuations are stripped
     before the parse.
 
@@ -132,6 +136,19 @@ KEYWORD_BEFORE_PAREN = re.compile(
     r'__declspec|deprecated|defined|explicit|constexpr|requires)\s*$')
 
 
+def _match_paren(decl, i):
+    """Index of the parenthesis closing the one at `i`, or -1."""
+    depth = 0
+    for j in range(i, len(decl)):
+        if decl[j] == '(':
+            depth += 1
+        elif decl[j] == ')':
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
 def _find_call_paren(decl, start):
     """The first parenthesis that opens an argument list rather than a macro."""
     i = decl.find('(', start)
@@ -140,20 +157,36 @@ def _find_call_paren(decl, start):
         if not MACRO_BEFORE_PAREN.search(head) and not KEYWORD_BEFORE_PAREN.search(head):
             return i
         # skip over the whole macro body
-        depth, j = 0, i
-        while j < len(decl):
-            if decl[j] == '(':
-                depth += 1
-            elif decl[j] == ')':
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        else:
+        j = _match_paren(decl, i)
+        if j < 0:
             return -1
         start = j + 1
         i = decl.find('(', start)
     return -1
+
+
+# A function pointer keeps its NAME in the first pair of parentheses and its
+# arguments in the second: `CvResult (CV_API_CALL *Capture_open)(const char*
+# filename, int camera_index, CvPluginCapture* handle)` and `typedef void
+# (*MouseCallback)(int event, int x, int y, int flags, void* userdata)`. Read
+# the first pair as the argument list and the function appears to take one
+# argument named after itself, so every documented argument reads as missing.
+# On opencv that was 111 false findings out of 133, in plugin tables and mouse
+# callbacks. The species lives in every project with a C-compatible interface.
+DECLARATOR = re.compile(
+    r'^[^(),]*?[*&]\s*(?:[A-Za-z_]\w*\s*::\s*\*\s*)?[A-Za-z_]\w*\s*$')
+OPENS_NEXT = re.compile(r'\s*\(')
+
+
+def _is_declarator(inner, decl, close):
+    """Do these parentheses hold a name rather than an argument list.
+
+    Two things have to hold at once, and the second is what keeps an ordinary
+    one-argument function safe: `void f(int *x)` looks exactly like a declarator
+    on the inside, and is told apart by what follows the closing parenthesis.
+    A declarator is always followed by the argument list itself.
+    """
+    return bool(DECLARATOR.match(inner)) and bool(OPENS_NEXT.match(decl[close + 1:]))
 
 
 def sig_params(decl):
@@ -166,18 +199,18 @@ def sig_params(decl):
     # a macro in the return type carries its own parentheses:
     # BOOST_BEAST_ASYNC_RESULT2(Handler); without skipping them they are taken
     # for the argument list of the function
-    i = _find_call_paren(decl, start)
-    if i < 0:
-        return None
-    depth, j = 0, i
-    while j < len(decl):
-        if decl[j] == '(': depth += 1
-        elif decl[j] == ')':
-            depth -= 1
-            if depth == 0: break
-        j += 1
-    else:
-        return None
+    while True:
+        i = _find_call_paren(decl, start)
+        if i < 0:
+            return None
+        j = _match_paren(decl, i)
+        if j < 0:
+            return None
+        if not _is_declarator(decl[i+1:j], decl, j):
+            break
+        # the name of a function pointer, the arguments are in the next pair
+        COUNTS["fnptr"] += 1
+        start = j + 1
     inner = decl[i+1:j]
     names, depth, cur = [], 0, ''
     for ch in inner:
@@ -253,7 +286,7 @@ def line_of(text, pos):
 
 COUNTS: Dict[str, int] = {"files": 0, "blocks": 0, "glued": 0, "skipped": 0,
                           "clang_parsed": 0, "clang_failed": 0, "stubs": 0,
-                          "aliases": 0}
+                          "aliases": 0, "fnptr": 0}
 
 
 def scan_text(src: str, rel: str) -> List[dict]:
@@ -294,7 +327,7 @@ def scan_text(src: str, rel: str) -> List[dict]:
 
 
 def scan(root: str) -> List[dict]:
-    COUNTS.update(files=0, blocks=0, glued=0, skipped=0)
+    COUNTS.update(files=0, blocks=0, glued=0, skipped=0, fnptr=0)
     hits: List[dict] = []
     base = pathlib.Path(root)
     for p in sorted(base.rglob('*.hpp')):
@@ -504,6 +537,7 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
         print(f"  project aliases skipped:{COUNTS['aliases']} (\\param_name from the project Doxyfile)")
     else:
         print(f"  family blocks:          {COUNTS['glued']} (a name repeats, cannot judge)")
+        print(f"  function pointers read: {COUNTS['fnptr']} (the name is in parentheses, the arguments follow)")
     print(common.findings_line(len(hits), 0))
     print(stamp.line(__file__, ["common.py"]))
 

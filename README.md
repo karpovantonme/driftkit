@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="driftkit — what a project says, against what it does" width="100%">
+  <img src="assets/banner.svg" alt="driftkit: what a project says, against what it does" width="100%">
 </p>
 
 <p align="center">
-  <strong>Sixteen tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
+  <strong>Seventeen tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
   Python 3.9+, standard library only, nothing to install.<br>
   <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub>
 </p>
 
 <p align="center">
-  <a href="#tests"><img alt="447 checks" src="https://img.shields.io/badge/checks-451%20green-3fb950?style=flat-square"></a>
+  <a href="#tests"><img alt="518 checks" src="https://img.shields.io/badge/checks-518%20green-3fb950?style=flat-square"></a>
   <a href="FALSE-POSITIVES.md"><img alt="61 false positives worked out" src="https://img.shields.io/badge/false%20positives-66%20worked%20out-f85149?style=flat-square"></a>
   <a href="#findings-that-became-merged-pull-requests"><img alt="17 merged" src="https://img.shields.io/badge/merged%20upstream-17-1f6feb?style=flat-square"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7d8590?style=flat-square"></a>
@@ -46,7 +46,7 @@ A real run, not an illustration. Eleven of those sixteen sit in `archive/`, whic
 
 ## The tools
 
-Eleven detectors. Each one is a species of defect we hit on a live project, not a category invented at a desk.
+Twelve detectors. Each one is a species of defect we hit on a live project. None of them is a category invented at a desk.
 
 | Tool | What it compares |
 |---|---|
@@ -61,12 +61,13 @@ Eleven detectors. Each one is a species of defect we hit on a live project, not 
 | `deaddrift` | removed in the changelog, still promised in the docs |
 | `assertdrift` | a helm-unittest assertion that never compares its message |
 | `linkdrift` | external links that no longer answer |
+| `racedrift` | a promise about concurrency against the suite run under the race detector |
 
 Five pipeline stages around them.
 
 | Stage | What it does |
 |---|---|
-| `sweep` | one run over a project instead of eleven by hand: survey, plan, run, refute |
+| `sweep` | one run over a project instead of twelve by hand: survey, plan, run, refute |
 | `sitecheck` | reads the project's own rules and says whether it is worth going there |
 | `refute` | tries to kill each finding before you ever see it |
 | `probe` | proves a test fails when it should, by swapping the expected value |
@@ -105,8 +106,10 @@ A tool like this is worth exactly the list of mistakes already worked out of it,
 | Sentinel `None` against what it becomes | **80 of 168** on networkx | Sentinels are not compared |
 | A name insertion counted as a typo | **162** | Transposition and substitution only |
 | An AI section in CONTRIBUTING taken for a ban | **would have skipped rclone, where we have a merge** | Judge by the requirements, not the heading |
+| A function pointer read as a one-argument function | **111 of 133** on opencv | The name is in the first pair of parentheses, the arguments in the second |
+| A `# numpydoc ignore=PR02` the author wrote on purpose | 1 on statsmodels | The directive names the very check we are running |
 
-Sixty-six worked cases, twelve species of mistake, and the table of what the kit is **not** immunised against yet: **[FALSE-POSITIVES.md](FALSE-POSITIVES.md)**.
+Eighty-eight worked cases, twelve species of mistake, and the table of what the kit is **not** immunised against yet: **[FALSE-POSITIVES.md](FALSE-POSITIVES.md)**.
 
 Two of those entries are worth singling out, because they are the dangerous kind: a self-refutation step that quietly killed real findings, and a directory mask that dropped `.github` and so reduced coverage without saying so. Both made the report look *cleaner*. That is why every run ends with a coverage block: `findings: 0 hard` next to `files read: 0` means "nothing to compare", not "clean".
 
@@ -158,14 +161,14 @@ One optional dependency: `ifacedrift` needs `protobuf` to parse `.proto` files (
 
 ```console
 $ cd driftkit && for f in test_*.py; do python3 "$f"; done
-451 checks, 0 failures
+518 checks, 0 failures
 ```
 
 Most of them pin a false positive that used to happen. `test_conformance.py` is the odd one out: it checks the tools against **each other**, and it is the only test that catches a tool drifting away from the shared contract. Run it after any change.
 
 ## Contract
 
-Every tool takes `--json FILE` and `-v`, writes objects carrying a boolean `hard`, ends with a `=== Coverage ===` block, and **exits 1 if and only if there is at least one hard finding** — so it drops straight into a shell `if`. See [`driftkit/common.py`](driftkit/common.py).
+Every tool takes `--json FILE` and `-v`, writes objects carrying a boolean `hard`, ends with a `=== Coverage ===` block, and **exits 1 if and only if there is at least one hard finding**, so it drops straight into a shell `if`. See [`driftkit/common.py`](driftkit/common.py).
 
 ## License
 
@@ -174,6 +177,6 @@ MIT. See [LICENSE](LICENSE).
 ---
 
 <p align="center">
-  <sub>Built by <a href="https://github.com/karpovantonme">Anton Karpov</a> — <a href="https://karpovanton.com">karpovanton.com</a><br>
+  <sub>Built by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a><br>
   Out of reading the places where it lied, on live projects, one case at a time.</sub>
 </p>
