@@ -98,8 +98,15 @@ import stamp  # noqa: E402
 SKIP_DIRS = common.SKIP_DIRS | {"test", "tests", "example", "examples", "doc", "docs",
                                "extensions"}
 
-BLOCK = re.compile(r'/\*[!*](.*?)\*/\s*(.{0,900}?)(?:\{|;)', re.S)
-SLASH = re.compile(r'((?:^[ \t]*///[^\n]*\n)+)([\s\S]{0,900}?)(?:\{|;)', re.M)
+# A declaration ends at `{`, at `;`, or -- for a constructor -- at the colon
+# that opens the member-initializer list. Without that third ending the
+# argument list plus the initializers routinely runs past the 900-character
+# limit, the match slides forward, and the comment gets compared against the
+# NEXT declaration in the file. On PCL that turned one constructor docblock
+# into 8 false findings against the destructor below it (issue #6).
+DECL_END = r'(?:\{|;|(?<=\))\s*:(?!:))'
+BLOCK = re.compile(r'/\*[!*](.*?)\*/\s*(.{0,900}?)' + DECL_END, re.S)
+SLASH = re.compile(r'((?:^[ \t]*///[^\n]*\n)+)([\s\S]{0,900}?)' + DECL_END, re.M)
 PARAM = re.compile(r'[\\@]param\s*(?:\[[^\]]*\])?\s+([A-Za-z_]\w*)')
 TPARAM = re.compile(r'[\\@]tparam\s+([A-Za-z_]\w*)')
 
@@ -236,6 +243,15 @@ def _is_declarator(inner, decl, close):
     return bool(DECLARATOR.match(inner)) and bool(OPENS_NEXT.match(decl[close + 1:]))
 
 
+def _has_arguments(decl):
+    """Are the argument brackets non-empty, whatever is written inside."""
+    i = _find_call_paren(decl, _skip_template(decl))
+    if i < 0:
+        return False
+    j = _match_paren(decl, i)
+    return j > i + 1 and bool(decl[i + 1:j].strip())
+
+
 def has_unnamed_params(decl):
     """Does the declaration carry a parameter written as its type alone.
 
@@ -322,8 +338,14 @@ def sig_params(decl):
         trimmed = re.sub(r'\b[A-Z][A-Z0-9_]{3,}\s*\([^)]*\)\s*$', '', n).strip()
         if trimmed and re.search(r'[A-Za-z_]\w*', trimmed):
             n = trimmed
-        # an unnamed constraint argument: constraint_t<...> with no name
-        if n.endswith('>') or not n:
+        # Nothing after the decoration means no name: `constraint_t<...>`,
+        # `PointCloudOut &`, `const pcl::PointCloud<PointSource>&`. Taking the
+        # last word there picks a piece of the TYPE -- on PCL that read
+        # `PointSource` out of the template argument and reported it as the
+        # parameter (issue #6).
+        if not n or n.rstrip().endswith(('>', '&', '*')):
+            if n:
+                COUNTS["unnamed"] = COUNTS.get("unnamed", 0) + 1
             continue
         m = re.findall(r'[A-Za-z_]\w*', n)
         if not m:
@@ -335,7 +357,10 @@ def sig_params(decl):
         # that means naming the parameter, which is a code change and not
         # something a docstring pass should send. Reported from the field on
         # PCL harris_2d/3d/6d (issue #6).
-        if m[-1] in BUILTIN_TYPES and len(m) == 1:
+        # One word is a type with nowhere to hang a name, whether it is a
+        # keyword (`bool = false`) or a user type (`PointCloudOut &`). The
+        # keyword list alone missed the second, found on PCL don.h:125.
+        if len(m) == 1:
             COUNTS["unnamed"] = COUNTS.get("unnamed", 0) + 1
             continue
         out.append(m[-1])
@@ -416,7 +441,12 @@ def scan_text(src: str, rel: str) -> List[dict]:
             # wrong; the parameter simply has no name. Fixing that means
             # editing the signature, which is a code change and not what a
             # documentation pass should send, so this drops to soft.
-            unnamed = has_unnamed_params(decl)
+            # Two ways a declaration ends up with nothing to attach a
+            # \param to: some arguments are written as bare types, or all of
+            # them are -- the latter is what `using Signature = void(A, B)`
+            # looks like. Either way the comment is not wrong and the fix is a
+            # code change, so the finding drops to soft rather than vanishing.
+            unnamed = has_unnamed_params(decl) or (not sp and _has_arguments(decl))
             for n in pnames:
                 if n not in sp:
                     hits.append(dict(kind='param', hard=not unnamed, file=rel, line=ln,
