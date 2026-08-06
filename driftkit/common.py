@@ -109,6 +109,7 @@ PLACE = {
     "assertdrift": LOCAL,
     "linkdrift": NETWORK,     # the only check that must reach live pages
     "docdrift": LOCAL,
+    "rstdrift": LOCAL,
     "doxdrift": LOCAL,        # the clang engine parses, it does not build
     "sitecheck": NETWORK,     # liveness comes from the merge log
     "refute": LOCAL,

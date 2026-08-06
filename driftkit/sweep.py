@@ -258,6 +258,13 @@ def build_plan(root: str, s: Dict[str, object], network: bool) -> List[Plan]:
     else:
         plans.append(Plan("docdrift", False, "almost no Python files, no docstrings to compare"))
 
+    # The same Python files, a different docstring dialect. docdrift reads
+    # numpydoc; a project may write nothing but `:param:` and look clean.
+    if int(s["py"]) >= 5:  # type: ignore[arg-type]
+        plans.append(Plan("rstdrift", True, f"{s['py']} Python files", [[root]]))
+    else:
+        plans.append(Plan("rstdrift", False, "almost no Python files"))
+
     if int(s["hpp"]) >= 5:  # type: ignore[arg-type]
         plans.append(Plan("doxdrift", True, f"{s['hpp']} .hpp headers", [[root]]))
     else:
