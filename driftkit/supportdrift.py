@@ -200,6 +200,21 @@ def collect_matrices(root: str, report: Report) -> Dict[str, Set[str]]:
                     continue
                 found.setdefault(lang, set()).update(vals)
                 report.matrices.append((path, lang, vals))
+            # `include:` adds combinations the main lists never produce, and
+            # they are usually written inline:
+            #     python-version: ["3.8", ..., "3.14.0-rc.2"]
+            #     include:
+            #       - {os: "ubuntu-22.04", python-version: "3.7"}
+            # Reading only the top-level key made python-fire look like it
+            # declares 3.7 and never tests it. It does test it -- here.
+            for m in re.finditer(
+                r"[{,]\s*" + re.escape(key) + r"\s*:\s*['\"]?([\w.\-]+)", text
+            ):
+                vals = re.findall(r"^(\d+\.\d+(?:\.\d+)?)", m.group(1))
+                if vals:
+                    found.setdefault(lang, set()).update(vals)
+                    report.matrices.append((path, lang, vals))
+                    seen_keys.add(key)
             # a list written under the key one item per line
             for m in re.finditer(
                 r"^([ \t]*)" + re.escape(key) + r"\s*:\s*$\n((?:\1[ \t]+-\s*\S+\n?)+)", text, re.M
@@ -251,7 +266,14 @@ def analyse(root: str, report: Report) -> None:
             )
             continue
         if c.kind == "list":
-            missing = [v for v in c.versions if v not in have]
+            # A matrix entry may be more specific than the claim: a project
+            # declares support for 3.14 and runs `3.14.0-rc.2`, which arrives
+            # here as 3.14.0. Comparing the strings called that untested.
+            # A claimed X.Y is exercised by any X.Y.Z in the matrix.
+            def _covered(v: str) -> bool:
+                return v in have or any(h.startswith(v + ".") for h in have)
+
+            missing = [v for v in c.versions if not _covered(v)]
             if missing:
                 report.findings.append(
                     Finding(

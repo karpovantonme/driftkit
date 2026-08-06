@@ -20,6 +20,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import ifacedrift as ifd  # noqa: E402
 
+# protobuf is not installed here, and without it every test in this file fails
+# for a reason unrelated to the code. Skipping says so; the tool itself now
+# returns exit code 2 instead of killing a sweep.
+try:
+    from google.protobuf import descriptor_pb2 as _pb  # noqa: F401
+    _HAS_PROTOBUF = True
+except ImportError:
+    _HAS_PROTOBUF = False
+needs_protobuf = unittest.skipIf(not _HAS_PROTOBUF, "protobuf is not installed")
+
 QDRANT = os.path.expanduser("~/Projects/oss/qdrant")
 QDRANT_PROTO = os.path.join(QDRANT, "lib/api/src/grpc/proto")
 QDRANT_OPENAPI = os.path.join(QDRANT, "docs/redoc/master/openapi.json")
@@ -60,6 +70,7 @@ def subjects(findings, kind=None):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestJsonPos(unittest.TestCase):
     def test_equals_stdlib_on_tricky_input(self):
         tricky = (
@@ -90,6 +101,7 @@ class TestJsonPos(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestProtoParsing(unittest.TestCase):
     def parse(self, text):
         td = tempfile.mkdtemp()
@@ -217,6 +229,7 @@ class TestProtoParsing(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestOpenApiParsing(unittest.TestCase):
     def load(self, doc):
         td = tempfile.mkdtemp()
@@ -309,6 +322,7 @@ class TestOpenApiParsing(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestDefaultProse(unittest.TestCase):
     def test_forms_that_must_be_read(self):
         cases = {
@@ -406,6 +420,7 @@ def simple_openapi(**overrides):
     }
 
 
+@needs_protobuf
 class TestSilenceWhenClean(unittest.TestCase):
     def test_naming_conventions_are_not_findings(self):
         """vectors_config against vectors is the norm of two formats. Naive
@@ -600,6 +615,7 @@ class TestSilenceWhenClean(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestFindsRealDrift(unittest.TestCase):
     def test_default_mismatch(self):
         proto = 'syntax = "proto3"; package t;\nmessage M {\n // Default is 1\n optional uint32 a = 1;\n}\n'
@@ -730,6 +746,7 @@ class TestFindsRealDrift(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestRefusesToGuess(unittest.TestCase):
     def test_ambiguous_short_name_is_not_matched(self):
         """The analogue of "searched by the short name instead of the full one":
@@ -790,6 +807,7 @@ class TestRefusesToGuess(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_QDRANT, "no qdrant clone in ~/Projects/oss/qdrant")
+@needs_protobuf
 class TestQdrantKnownTruth(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -909,6 +927,7 @@ class TestQdrantKnownTruth(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+@needs_protobuf
 class TestSwagger2(unittest.TestCase):
     def test_definitions_and_package_prefixed_names(self):
         """grpc-gateway puts schemas into definitions and writes the name with the
@@ -991,6 +1010,7 @@ HAS_ETCD = os.path.isdir(ETCD_PROTO) and os.path.isfile(ETCD_SWAGGER) and GAPI
 
 
 @unittest.skipUnless(HAS_ETCD, "no etcd clone or googleapis-common-protos")
+@needs_protobuf
 class TestGeneratedSpecIsSilent(unittest.TestCase):
     """In etcd the swagger file is generated from proto through grpc-gateway, so
     no mismatch can exist by construction and a correct tool has to report zero.

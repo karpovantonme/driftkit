@@ -184,5 +184,45 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(rep.findings, [])
 
 
+
+class TestFieldReports(unittest.TestCase):
+    """Two shapes reported after a run over google/python-fire."""
+
+    def test_include_block_counts_as_tested(self):
+        """`include:` adds combinations the main list never produces."""
+        root = project({
+            "pyproject.toml": 'requires-python = ">=3.7"\n',
+            ".github/workflows/ci.yml": """
+jobs:
+  build:
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9"]
+        include:
+          - {os: "ubuntu-22.04", python-version: "3.7"}
+""",
+        })
+        report = sd.Report()
+        found = sd.collect_matrices(root, report)
+        self.assertIn("3.7", found["python"])
+
+    def test_a_prerelease_in_the_matrix_covers_the_claim(self):
+        """Declared 3.14, matrix runs 3.14.0-rc.2: that is the same version."""
+        root = project({
+            "pyproject.toml": 'classifiers = ["Programming Language :: Python :: 3.14"]\n',
+            ".github/workflows/ci.yml": """
+jobs:
+  build:
+    strategy:
+      matrix:
+        python-version: ["3.14.0-rc.2"]
+""",
+        })
+        report = sd.Report()
+        sd.analyse(root, report)
+        self.assertEqual(
+            [f for f in report.findings if f.kind == "declared-not-tested"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

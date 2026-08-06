@@ -117,6 +117,14 @@ _IDENTIFIER_URI = re.compile(
 
 UA = "Mozilla/5.0 (compatible; linkdrift/1.0; +https://github.com/)"
 
+# Without an Accept header a single-page site cannot tell what is being asked
+# for and answers 404 to a live page. crates.io does exactly that: the same
+# URL is 404 with no Accept and 200 with one, for any user agent. That cost 26
+# false "dead links" of 35 on comprehensive-rust before it was measured -- and
+# the first diagnosis, that these hosts refuse robots by user agent, was wrong.
+# Browsers send this string; so do we now.
+ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
 
 @dataclass
 class Finding:
@@ -226,7 +234,8 @@ class Checker:
             fh.write(verdict)
 
     def _ask(self, url: str, method: str) -> str:
-        req = urllib.request.Request(url, method=method, headers={"User-Agent": UA})
+        req = urllib.request.Request(url, method=method,
+                                     headers={"User-Agent": UA, "Accept": ACCEPT})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return str(resp.status)

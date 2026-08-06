@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -220,6 +221,34 @@ class TestReportedByUsers(unittest.TestCase):
 
 
 
+
+
+class TestRequestHeaders(unittest.TestCase):
+    """A single-page site answers by Accept, not by user agent.
+
+    crates.io returns 404 for a live page when no Accept header is sent, for
+    any user agent. Diagnosed first as bot protection, which was wrong: 26 of
+    35 "dead links" on comprehensive-rust came from the missing header.
+    """
+
+    def test_accept_header_is_sent(self):
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            seen["accept"] = req.get_header("Accept")
+            seen["ua"] = req.get_header("User-agent")
+            return FakeResponse()
+
+        c = ld.Checker(cache_dir=tempfile.mkdtemp(), pause=0)
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            self.assertEqual(c.check("https://example.invalid/page"), "200")
+        self.assertIn("text/html", seen["accept"])
+        self.assertIn("linkdrift", seen["ua"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
