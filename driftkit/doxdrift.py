@@ -328,6 +328,7 @@ def sig_params(decl):
         # too, or the name is read from the pointer's own argument list
         m2 = re.search(r'\(\s*(?:[A-Za-z_]\w*\s*::\s*)*[&*]\s*([A-Za-z_]\w*)\s*\)', n)
         if m2:
+            COUNTS["fnptr_arg"] = COUNTS.get("fnptr_arg", 0) + 1
             out.append(m2.group(1)); continue
         # trailing dimensions and bracketed suffixes are dropped
         n = re.sub(r'\[[^\]]*\]', '', n)
@@ -691,7 +692,10 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
         print(f"  project aliases skipped:{COUNTS['aliases']} (\\param_name from the project Doxyfile)")
     else:
         print(f"  family blocks:          {COUNTS['glued']} (a name repeats, cannot judge)")
-        print(f"  function pointers read: {COUNTS['fnptr']} (the name is in parentheses, the arguments follow)")
+        # Two different shapes, and reporting only the first read as "there are
+        # none" when the tree was full of the second (issue #6).
+        print(f"  fn pointer declarations:{COUNTS['fnptr']} (the NAME is in parentheses, arguments follow)")
+        print(f"  fn pointer arguments:   {COUNTS.get('fnptr_arg', 0)} (void(*cb)(int), char(&d)[N], void (T::*m)())")
     # Was `findings_line(len(hits), 0)`: every finding counted as hard, no
     # matter what the scan decided. The same lie as in the JSON writer, and it
     # survived because until now there was no soft class to get wrong.

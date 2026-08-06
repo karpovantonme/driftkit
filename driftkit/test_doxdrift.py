@@ -539,6 +539,20 @@ typedef void (*MouseCallback)(int event, int x, int y, int flags, void* userdata
         doxdrift.scan_text(self.TYPEDEF, "a.hpp")
         self.assertEqual(doxdrift.COUNTS["fnptr"], 1)
 
+    def test_the_two_shapes_are_counted_apart(self):
+        """A pointer as the NAME and a pointer as an ARGUMENT are different.
+
+        Only the first was counted, so a tree full of `void(*cb)(int)`
+        parameters reported "function pointers read: 0" and looked like a tree
+        with none. Reported by darkdi (issue #6): PCL has 33 of the second
+        shape and none of the first.
+        """
+        doxdrift.COUNTS["fnptr"] = 0
+        doxdrift.COUNTS["fnptr_arg"] = 0
+        doxdrift.sig_params("void on(void(*cb)(int))")
+        self.assertEqual(doxdrift.COUNTS["fnptr"], 0)
+        self.assertEqual(doxdrift.COUNTS["fnptr_arg"], 1)
+
 
 class TestSuppressionMeasured(unittest.TestCase):
     """`\\cond` is the C++ construct closest to a numpydoc ignore directive.
