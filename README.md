@@ -51,6 +51,7 @@ Twelve detectors. Each one is a species of defect we hit on a live project. None
 | Tool | What it compares |
 |---|---|
 | `docdrift` | numpydoc `Parameters` against the real Python signature |
+| `rstdrift` | Sphinx `:param:` and epytext `@param` against the same signature |
 | `doxdrift` | Doxygen `\param` and `\tparam` against the real C++ declaration |
 | `ifacedrift` | protobuf against OpenAPI, when a project maintains both by hand |
 | `liftdrift` | a vendored copy against the upstream commit that fixed it |
