@@ -326,11 +326,31 @@ def scan_text(src: str, rel: str) -> List[dict]:
     return hits
 
 
+# Header suffixes, not just the Boost one.
+#
+# For its first months this tool globbed '*.hpp' only. Boost writes .hpp, so
+# it looked like it worked. Google, Chromium, LLVM and most of the C++ world
+# write .h: the run over protobuf reported "headers read: 6" against 611 real
+# headers, abseil 0 against 385, googletest 0 against 49. Zero findings read
+# as "clean" when it meant "did not look". Blindness costs more than a false
+# positive, because a false positive argues with you and blindness does not.
+HEADER_GLOBS = ("*.hpp", "*.h", "*.hh", "*.hxx", "*.h++", "*.ipp", "*.inl")
+
+
+def _headers(base: pathlib.Path):
+    seen = set()
+    for pattern in HEADER_GLOBS:
+        for p in base.rglob(pattern):
+            if p not in seen:
+                seen.add(p)
+                yield p
+
+
 def scan(root: str) -> List[dict]:
     COUNTS.update(files=0, blocks=0, glued=0, skipped=0, fnptr=0)
     hits: List[dict] = []
     base = pathlib.Path(root)
-    for p in sorted(base.rglob('*.hpp')):
+    for p in sorted(_headers(base)):
         parts = p.relative_to(base).parts
         if any(x in SKIP_DIRS or (x.startswith(".") and x not in common.KEEP_HIDDEN)
                for x in parts):
@@ -489,7 +509,7 @@ def scan_clang(root: str) -> List[dict]:
     stubs = tempfile.mkdtemp(prefix="doxdrift-stubs-")
     seen = set()
     try:
-        for p in sorted(base.rglob("*.hpp")):
+        for p in sorted(_headers(base)):
             parts = p.relative_to(base).parts
             if any(x in SKIP_DIRS or (x.startswith(".") and x not in common.KEEP_HIDDEN)
                    for x in parts):

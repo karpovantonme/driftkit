@@ -79,10 +79,18 @@ WEIGHT = [(re.compile(p, re.I), w) for p, w, _ in PROMISES]
 # as the file `unsafe.S` plus the symbol `izeof`, and single-letter assembly
 # extensions turn every `pkg.Something` into a false hit. Cost of learning
 # this: six bogus findings in the first Go run.
+#
+# But the guard has to be `(?!\w)(?!\.\w)`, not `(?![\w.])`. The blunter
+# version also rejects a path at the end of a sentence -- "a copy of this
+# lives in cmd/compile/internal/gc/noder.go." -- because the full stop
+# follows the extension. That silently blinded the tool to the very finding
+# it had just made in Go. Whenever a filter is tightened, re-run it against a
+# known finding: fixing the ore is easy, and losing the vein with it is
+# easier.
 PATH_RE = re.compile(
     r"(?<![\w/.-])(?:src/)?"
     r"((?:[a-z][\w-]*/){0,6}[\w.-]+\.(?:go|c|h|cc|cpp|py|rs|js|ts|s|S))"
-    r"(?![\w.])"
+    r"(?!\w)(?!\.\w)"
     r"(?::(\w+))?"
 )
 
@@ -128,7 +136,10 @@ def walk(root: str):
 
 
 def collect(root: str, verbose: bool = False):
-    findings, checked, foreign, promises = [], 0, 0, 0
+    findings, checked, foreign, promises, ambiguous = [], 0, 0, 0, 0
+    # every source file in the tree, so a shortened path can be resolved by
+    # its tail instead of being reported as missing
+    index = [p for p, _ in walk(root)]
     for path, ext in walk(root):
         rx = COMMENT_RE[ext]
         try:
@@ -162,6 +173,19 @@ def collect(root: str, verbose: bool = False):
                 # tolerate the tree having a src/ root, as Go does
                 candidates.append(os.path.join(root, "src", target))
                 resolved = next((c for c in candidates if os.path.exists(c)), None)
+                # People shorten paths to the part that disambiguates:
+                # "ssa/html.go" from inside cmd/compile/internal/ir means the
+                # sibling package. Accept a suffix match, but only when it is
+                # unique in the tree -- two matches mean we cannot tell which
+                # one was meant, and guessing would be worse than silence.
+                if resolved is None:
+                    tail = "/" + target
+                    matches = [p for p in index if p.endswith(tail)]
+                    if len(matches) == 1:
+                        resolved = matches[0]
+                    elif len(matches) > 1:
+                        ambiguous += 1
+                        continue
                 if resolved is None:
                     findings.append({
                         "kind": "dangling",
@@ -176,7 +200,7 @@ def collect(root: str, verbose: bool = False):
                     print(f"  ok  {os.path.relpath(path, root)}:{lineno} -> {target}",
                           file=sys.stderr)
     return findings, {"promises": promises, "refs_checked": checked,
-                      "pointing_outside": foreign}
+                      "pointing_outside": foreign, "ambiguous": ambiguous}
 
 
 def main() -> int:
@@ -206,6 +230,7 @@ def main() -> int:
     print(f"  promises found:         {cov['promises']}")
     print(f"  pointing outside tree:  {cov['pointing_outside']} (not ours to check)")
     print(f"  file references read:   {cov['refs_checked']}")
+    print(f"  shortened, two matches: {cov['ambiguous']} (cannot tell which was meant)")
     print(f"  findings:               {len(hard)} hard, {len(soft)} soft")
 
     if args.json:
