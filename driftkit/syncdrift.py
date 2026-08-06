@@ -89,7 +89,8 @@ WEIGHT = [(re.compile(p, re.I), w) for p, w, _ in PROMISES]
 # easier.
 PATH_RE = re.compile(
     r"(?<![\w/.-])(?:src/)?"
-    r"((?:[a-z][\w-]*/){0,6}[\w.-]+\.(?:go|c|h|cc|cpp|py|rs|js|ts|s|S))"
+    r"((?:[a-z][\w-]*/){0,6}[\w.-]+\.(?:go|c|h|cc|cpp|cxx|hh|hpp|py|rs|js|ts"
+    r"|java|kt|scala|swift|cs|m|mm|rb|sh|s|S))"
     r"(?!\w)(?!\.\w)"
     r"(?::(\w+))?"
 )
@@ -110,6 +111,20 @@ COMMENT_RE = {
     ".js":  re.compile(r"^\s*(?://|\*)\s?(.*)$"),
     ".ts":  re.compile(r"^\s*(?://|\*)\s?(.*)$"),
     ".py":  re.compile(r"^\s*#\s?(.*)$"),
+    # Added after the C++ pool showed what a missing suffix costs: a tool that
+    # does not know an extension reports zero and looks like it worked.
+    ".java":  re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".kt":    re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".scala": re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".swift": re.compile(r"^\s*(?:///?)\s?(.*)$"),
+    ".cs":    re.compile(r"^\s*(?://|///)\s?(.*)$"),
+    ".m":     re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".mm":    re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".hh":    re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".hpp":   re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".cxx":   re.compile(r"^\s*(?://|\*)\s?(.*)$"),
+    ".rb":    re.compile(r"^\s*#\s?(.*)$"),
+    ".sh":    re.compile(r"^\s*#\s?(.*)$"),
 }
 
 SKIP_DIRS = {".git", "testdata", "vendor", "node_modules", "third_party",

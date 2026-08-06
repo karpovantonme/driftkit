@@ -127,6 +127,13 @@ sent to maintainers if nobody had read them.
 | 85 | docdrift | A heading underlined with `==========` instead of dashes | 1 function on networkx, invisible | Either character underlines a heading |
 | 86 | docdrift | The whole block indented one level deeper than its `Parameters` heading | 2 functions on qutip and graphrag, invisible | The indent falls back to the first line after the underline, taken by position |
 | 87 | docdrift | A name documented with no type and no description below it | 1 on statsmodels, invisible | A name ending its section is a name |
+| 89 | doxdrift | A constructor with an initialiser list: `RPA_UKS(Logger& log, const TCMatrix& Mmn) : log_(log), Mmn_(Mmn) {}` | 1 on votca | The argument list ends at the closing bracket, not at the first colon |
+| 90 | doxdrift | A C++20 `requires` clause standing between the template header and the function | 2 on mqt-core | Skip a `requires` clause when looking for the declaration |
+| 91 | doxdrift | The `@file` block at the top of a header read as a function's docstring | 3 on emlearn-micropython | A block with `@file` or `@brief` and no declaration under it belongs to the file |
+| 92 | doxdrift | Only `*.hpp` was globbed, so `.h` trees reported zero and looked clean | protobuf 6 headers of 611, abseil 0 of 385, googletest 0 of 49; 21 findings invisible across the checked C++ pool | Seven header suffixes instead of one, and the read count printed next to the finding count |
+| 93 | syncdrift | `unsafe.Sizeof` parsed as the file `unsafe.S` plus a symbol | 6 on the first Go run | The extension must end the word |
+| 94 | syncdrift | The guard from case 93 also rejected a path ending a sentence: `... in gc/noder.go.` | 2 real findings went invisible, in the very tree where they had just been found | `(?!\w)(?!\.\w)` instead of `(?![\w.])`, plus a regression run against a known finding after every tightening |
+| 95 | syncdrift | A shortened path naming a sibling package: `ssa/html.go` from inside `cmd/compile/internal/ir` | 1 on Go | Resolve by unique suffix in the tree; two matches mean silence, not a guess |
 | 88 | numpydoc, the reference parser | With no blank line before `Returns` the two sections run together and `Returns` becomes a parameter | 40 or so across the pool | Recorded rather than fixed: our own rule is the exact one here |
 
 Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
