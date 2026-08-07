@@ -31,11 +31,24 @@ for with false findings on Boost:
   - preprocessor directives together with their `\\` continuations are stripped
     before the parse.
 
+TWO SYNTAXES. Doxygen writes `\\param name text`; gtk-doc writes `@name: text`
+under a line naming the symbol. harfbuzz, GLib, GTK, GStreamer, pango and
+libsoup use the second, and to a Doxygen-only tool they all read as
+documentation-free: 336 headers of harfbuzz, "0 blocks with \\param". A gtk-doc
+block also documents the PUBLIC prototype and sits next to the body, so for
+that syntax the headers are indexed first and the comment is compared against
+the declaration from the header rather than against the definition below it --
+harfbuzz names an argument `coords_length` in hb-font.h and
+`input_coords_length` in hb-font.cc, and the block is right to follow the
+header.
+
 KNOWN BLIND SPOTS:
-  - **headers only.** `.hpp .h .hh .hxx .h++ .ipp .inl` are read, `.cpp` and
-    `.cc` are not: declarations live in headers. Until 06.08.2026 only `.hpp`
-    was read, which made every `.h` project report a clean zero -- protobuf 6
-    headers of 611, abseil 0 of 385;
+  - **headers, plus implementation files for gtk-doc only.**
+    `.hpp .h .hh .hxx .h++ .ipp .inl` are read in full; `.c .cc .cpp .cxx` are
+    read only for gtk-doc blocks, because that is where such a project keeps
+    them. Doxygen in a `.cc` stays unread, so no other project's report moves.
+    Until 06.08.2026 only `.hpp` was read, which made every `.h` project report
+    a clean zero -- protobuf 6 headers of 611, abseil 0 of 385;
   - declarations longer than 900 characters are cut off. Looking further makes
     no sense, and no finding will come from there either;
   - macros that assemble a whole signature are skipped on purpose (`#define`,
@@ -109,6 +122,53 @@ BLOCK = re.compile(r'/\*[!*](.*?)\*/\s*(.{0,900}?)' + DECL_END, re.S)
 SLASH = re.compile(r'((?:^[ \t]*///[^\n]*\n)+)([\s\S]{0,900}?)' + DECL_END, re.M)
 PARAM = re.compile(r'[\\@]param\s*(?:\[[^\]]*\])?\s+([A-Za-z_]\w*)')
 TPARAM = re.compile(r'[\\@]tparam\s+([A-Za-z_]\w*)')
+
+# gtk-doc says the same thing in another syntax: the block opens with the name
+# of the symbol on a line of its own, and each parameter is `@name: text`
+# rather than `\param name text`. A whole family of root libraries writes this
+# way -- harfbuzz, GLib, GTK, GStreamer, pango, libsoup -- and to a tool that
+# knows only Doxygen they all read as documentation-free. On harfbuzz that was
+# 336 headers read and "0 blocks with \param", which is the shape of blindness
+# rather than of cleanliness.
+GTK_HEAD = re.compile(r'\A(?:\s*\*?\s*\n)*\s*\*?\s*([A-Za-z_]\w*)\s*:(?:\s*\([^)]*\))?\s*$', re.M)
+GTK_PARAM = re.compile(r'^\s*\*\s*@([A-Za-z_]\w*)\s*:', re.M)
+# Fields of the block itself. `Returns:` and `Since:` also appear as `@Returns:`
+# in older sources, so they are matched case-insensitively below.
+GTK_NOT_A_PARAM = frozenset({
+    "title", "short_description", "include", "see_also", "stability",
+    "section_id", "image", "returns", "return", "since", "deprecated",
+})
+
+
+def gtk_params(doc: str) -> List[str]:
+    """Parameters of a gtk-doc block, or nothing when the block is not one."""
+    head = GTK_HEAD.match(doc)
+    if not head or head.group(1) == "SECTION":
+        return []
+    return [n for n in GTK_PARAM.findall(doc) if n.lower() not in GTK_NOT_A_PARAM]
+
+
+def gtk_symbol(doc: str) -> Optional[str]:
+    """The symbol a gtk-doc block documents, from its opening line."""
+    head = GTK_HEAD.match(doc)
+    return head.group(1) if head else None
+
+
+# A function-like macro is documented the same way as a function, and the
+# preprocessor stripper removes the `#define` right after the block, so the
+# comment ends up compared against the NEXT real declaration in the file. In
+# harfbuzz that is `HB_TAG(c1,c2,c3,c4)` measured against `hb_tag_from_string
+# (str, len)`: four false findings from one macro, and the file has more.
+MACRO_DEF = re.compile(r'^\s*#\s*define\s+([A-Za-z_]\w*)\(([^)]*)\)', re.M)
+
+
+def macro_params(decl: str, symbol: Optional[str]):
+    """Parameters of the macro this block documents, when that is what it is."""
+    for m in MACRO_DEF.finditer(decl):
+        if symbol is not None and m.group(1) != symbol:
+            continue
+        return [p.strip() for p in m.group(2).split(",") if p.strip()]
+    return None
 
 
 def _skip_template(decl):
@@ -222,6 +282,12 @@ def _find_call_paren(decl, start):
 # the optional qualification, not before it.
 DECLARATOR = re.compile(
     r'^[^(),]*?(?:[A-Za-z_]\w*\s*::\s*)*[*&]\s*[A-Za-z_]\w*\s*$')
+# A bare name in parentheses is a declarator too. C libraries write the
+# definition that way when a macro of the same name would otherwise expand:
+# `uint8_t (hb_color_get_alpha) (hb_color_t color)`. Five false findings in
+# harfbuzz, all of them reported as "in the declaration: (empty)", because the
+# name was read as the argument list and the list held no names.
+BARE_NAME = re.compile(r'^\s*[A-Za-z_]\w*\s*$')
 OPENS_NEXT = re.compile(r'\s*\(')
 
 # A parameter written as its type alone has no name to match a \param against.
@@ -240,7 +306,14 @@ def _is_declarator(inner, decl, close):
     on the inside, and is told apart by what follows the closing parenthesis.
     A declarator is always followed by the argument list itself.
     """
-    return bool(DECLARATOR.match(inner)) and bool(OPENS_NEXT.match(decl[close + 1:]))
+    if not OPENS_NEXT.match(decl[close + 1:]):
+        return False
+    if DECLARATOR.match(inner):
+        return True
+    # `(name) (args)`: a bare name is a declarator, a bare TYPE is a nameless
+    # argument. Only one of the two is followed by another argument list, and
+    # that has already been checked above.
+    return bool(BARE_NAME.match(inner)) and inner.strip() not in BUILTIN_TYPES
 
 
 def _has_arguments(decl):
@@ -289,6 +362,11 @@ def has_unnamed_params(decl):
 
 def sig_params(decl):
     """Argument identifiers taken from the parentheses of a declaration."""
+    # A comment inside the argument list is not part of any name. harfbuzz
+    # annotates directions there -- `hb_tag_t *table_tags /* OUT */` -- and the
+    # name was read as `OUT`, so every such argument looked undocumented.
+    decl = re.sub(r'/\*.*?\*/', ' ', decl, flags=re.S)
+    decl = re.sub(r'//[^\n]*', ' ', decl)
     # operator() and operator[] carry parentheses inside the name: without this
     # find('(') lands in the empty parentheses of the name and the list is lost
     decl = re.sub(r'operator\s*\(\s*\)', 'operator_call', decl)
@@ -339,6 +417,14 @@ def sig_params(decl):
         trimmed = re.sub(r'\b[A-Z][A-Z0-9_]{3,}\s*\([^)]*\)\s*$', '', n).strip()
         if trimmed and re.search(r'[A-Za-z_]\w*', trimmed):
             n = trimmed
+        # The same tail without parentheses: an attribute macro right after the
+        # name, `const hb_gpu_draw_t *draw HB_UNUSED`. Elsewhere it is spelled
+        # G_GNUC_UNUSED or UNUSED. Read as the name, it makes every argument so
+        # marked look undocumented. Same shape as the rule above, so the same
+        # length bound: four characters or more, all upper case.
+        attr = re.sub(r'\b[A-Z][A-Z0-9_]{3,}\s*$', '', n).strip()
+        if attr and re.search(r'[A-Za-z_]\w*', attr):
+            n = attr
         # Nothing after the decoration means no name: `constraint_t<...>`,
         # `PointCloudOut &`, `const pcl::PointCloud<PointSource>&`. Taking the
         # last word there picks a piece of the TYPE -- on PCL that read
@@ -409,18 +495,45 @@ def line_of(text, pos):
 
 COUNTS: Dict[str, int] = {"files": 0, "blocks": 0, "glued": 0, "skipped": 0,
                           "clang_parsed": 0, "clang_failed": 0, "stubs": 0,
-                          "aliases": 0, "fnptr": 0}
+                          "aliases": 0, "fnptr": 0, "gtk": 0, "sources": 0,
+                          "macro": 0}
 
 
-def scan_text(src: str, rel: str) -> List[dict]:
-    """Findings in one header. A separate function so tests need no disk."""
+def scan_text(src: str, rel: str, gtk_only: bool = False) -> List[dict]:
+    """Findings in one header. A separate function so tests need no disk.
+
+    `gtk_only` is for implementation files. gtk-doc keeps the documentation of
+    a function next to its body rather than next to the declaration, so those
+    files have to be read too -- but only for that syntax, so that what the
+    tool reports on every other project stays exactly as it was.
+    """
     hits: List[dict] = []
     for m in itertools.chain(BLOCK.finditer(src), SLASH.finditer(src)):
-        doc, decl = m.group(1), m.group(2)
-        decl = _strip_preprocessor(decl)
+        doc, raw_decl = m.group(1), m.group(2)
+        decl = _strip_preprocessor(raw_decl)
         pnames = PARAM.findall(doc)
         tnames = TPARAM.findall(doc)
+        is_gtk = False
+        if not pnames:
+            pnames = gtk_params(doc)
+            is_gtk = bool(pnames)
+        if gtk_only and not is_gtk:
+            continue
         if not pnames and not tnames:
+            continue
+        COUNTS["gtk"] += 1 if is_gtk else 0
+        # The block may be documenting a function-like macro rather than the
+        # declaration that follows it.
+        mp = macro_params(raw_decl, gtk_symbol(doc) if is_gtk else None)
+        if mp is not None:
+            COUNTS["blocks"] += 1
+            COUNTS["macro"] += 1
+            ln = line_of(src, m.start())
+            for n in pnames:
+                if n not in mp:
+                    hits.append(dict(kind='param', hard=True, file=rel, line=ln,
+                                     name=n, sig=mp, unnamed=False,
+                                     decl=' '.join(raw_decl.split())[:120]))
             continue
         COUNTS["blocks"] += 1
         if '#define' in decl or 'BOOST_GEOMETRY_' in decl.split('(')[0]:
@@ -434,6 +547,29 @@ def scan_text(src: str, rel: str) -> List[dict]:
             COUNTS["glued"] += 1
             continue
         sp = sig_params(decl)
+        # A gtk-doc block documents the public prototype. When the headers
+        # declare this symbol, they are the thing to compare against: the
+        # definition below the block may name its arguments differently, and
+        # that is legal C rather than a documentation defect.
+        # Only when the block really sits above a function. A gtk-doc block
+        # over `typedef enum {...} hb_paint_extend_t` documents the members of
+        # the enum with the same `@NAME:` syntax, and there is no argument list
+        # anywhere near: 62 findings appeared out of nowhere when the public
+        # prototype was substituted into those too.
+        if is_gtk:
+            symbol = gtk_symbol(doc) or ""
+            public = HEADER_SIGS.get(symbol)
+            if public and sp is not None:
+                sp = public
+                COUNTS["public"] = COUNTS.get("public", 0) + 1
+            elif symbol != declared_name(decl):
+                # The block names the symbol it documents, and this one is not
+                # the declaration below it: a block over `SoupCookieJarAcceptPolicy`
+                # followed by `soup_cookie_jar_set_accept_policy` documents the
+                # members of an enum, and every member read as a parameter.
+                # 67 findings on libsoup, 260 on glib, all of this shape.
+                COUNTS["other_symbol"] = COUNTS.get("other_symbol", 0) + 1
+                continue
         tp = tpl_params(decl)
         ln = line_of(src, m.start())
         if sp is not None:
@@ -471,32 +607,118 @@ def scan_text(src: str, rel: str) -> List[dict]:
 # positive, because a false positive argues with you and blindness does not.
 HEADER_GLOBS = ("*.hpp", "*.h", "*.hh", "*.hxx", "*.h++", "*.ipp", "*.inl")
 
+# Implementation files, read for gtk-doc only. A gtk-doc block sits above the
+# body of the function, so a project written that way keeps almost all of its
+# documentation here and none of it in the headers.
+SOURCE_GLOBS = ("*.c", "*.cc", "*.cpp", "*.cxx")
 
-def _headers(base: pathlib.Path):
+
+def _files(base: pathlib.Path, globs):
     seen = set()
-    for pattern in HEADER_GLOBS:
+    for pattern in globs:
         for p in base.rglob(pattern):
             if p not in seen:
                 seen.add(p)
                 yield p
 
 
+def _headers(base: pathlib.Path):
+    yield from _files(base, HEADER_GLOBS)
+
+
+# Public prototypes, gathered from the headers before the sources are read.
+#
+# gtk-doc documents the PUBLIC interface, and a C library is free to name the
+# arguments of a definition differently from its declaration. harfbuzz does:
+# `hb_font_set_var_coords_design` takes `coords_length` in hb-font.h and
+# `input_coords_length` in hb-font.cc. The block, correctly, documents the
+# header. Comparing it against the definition it happens to sit above reported
+# three findings that were the tool's error rather than the project's.
+HEADER_SIGS: Dict[str, List[str]] = {}
+NAME_BEFORE_PAREN = re.compile(r'([A-Za-z_]\w*)\s*$')
+
+
+def declared_name(decl: str) -> Optional[str]:
+    """The name a declaration declares: the word before its argument list."""
+    i = _find_call_paren(decl, _skip_template(decl))
+    if i < 0:
+        return None
+    m = NAME_BEFORE_PAREN.search(decl[:i].rstrip().rstrip(")").rstrip())
+    return m.group(1) if m else None
+
+
+def _remember_header_sigs(src: str) -> None:
+    """Every prototype the header declares, documented or not.
+
+    Reading only the declarations that carry a docblock finds nothing here:
+    a gtk-doc project documents in the .cc and leaves the header bare.
+    """
+    src = re.sub(r'/\*.*?\*/', ' ', src, flags=re.S)
+    for chunk in src.split(';'):
+        if '(' not in chunk or '{' in chunk:
+            continue
+        # A `#define` above the prototype carries no `;`, so it lands in the
+        # same chunk. Dropping the whole chunk over it lost g_array_new and
+        # every other prototype that follows a macro block in the header.
+        decl = _strip_preprocessor(chunk).strip()
+        # `GIOStatus (*io_write) (GIOChannel *channel, ...)` is a field of a
+        # struct of callbacks, not a prototype. Indexed as one, it taught the
+        # tool that the TYPE `GIOStatus` takes those arguments, and every
+        # gtk-doc block about that enum was then measured against them.
+        if '(' not in decl or '(*' in decl.replace(' ', ''):
+            continue
+        if len(decl) > 900:
+            continue
+        name = declared_name(decl)
+        if not name:
+            continue
+        params = sig_params(decl)
+        if not params:
+            continue
+        known = HEADER_SIGS.get(name)
+        if known is None:
+            HEADER_SIGS[name] = params
+        elif known != params:
+            # Two prototypes of one name that disagree: nothing reliable to
+            # compare against, so the tool keeps quiet rather than guesses.
+            HEADER_SIGS[name] = []
+
+
 def scan(root: str) -> List[dict]:
-    COUNTS.update(files=0, blocks=0, glued=0, skipped=0, fnptr=0)
+    COUNTS.update(files=0, blocks=0, glued=0, skipped=0, fnptr=0, gtk=0, sources=0, macro=0)
+    HEADER_SIGS.clear()
     hits: List[dict] = []
     base = pathlib.Path(root)
-    for p in sorted(_headers(base)):
+
+    def read(p):
         parts = p.relative_to(base).parts
         if any(x in SKIP_DIRS or (x.startswith(".") and x not in common.KEEP_HIDDEN)
                for x in parts):
-            continue
+            return None
         try:
-            src = p.read_text(encoding='utf-8', errors='ignore')
+            return p.read_text(encoding='utf-8', errors='ignore')
         except OSError:
             COUNTS["skipped"] += 1
+            return None
+
+    for p in sorted(_headers(base)):
+        src = read(p)
+        if src is None:
             continue
         COUNTS["files"] += 1
+        # The public C interface only. harfbuzz keeps its C++ internals in .hh
+        # with methods of the same names, and mixing the two indexes gave 12
+        # findings where a comment was measured against an unrelated signature.
+        if p.suffix == ".h" and "class " not in src:
+            _remember_header_sigs(src)
         hits.extend(scan_text(src, str(p.relative_to(base))))
+
+    for p in sorted(_files(base, SOURCE_GLOBS)):
+        src = read(p)
+        if src is None:
+            continue
+        COUNTS["sources"] += 1
+        hits.extend(scan_text(src, str(p.relative_to(base)), gtk_only=True))
     return hits
 
 
@@ -683,8 +905,13 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
     print(f"  tree:                   {root}")
     print(f"  engine:                 {engine}")
     print(f"  headers read:           {COUNTS['files']}")
+    print(f"  sources read:           {COUNTS.get('sources', 0)} (gtk-doc lives next to the body)")
     print(f"  headers skipped:        {COUNTS['skipped']} (unreadable)")
     print(f"  blocks with \\param:     {COUNTS['blocks']}")
+    print(f"  of them gtk-doc:        {COUNTS.get('gtk', 0)} (@name: rather than \\param name)")
+    print(f"  macro blocks:           {COUNTS.get('macro', 0)} (compared against #define, not the next declaration)")
+    print(f"  checked against header: {COUNTS.get('public', 0)} (gtk-doc documents the public prototype)")
+    print(f"  blocks about another symbol:{COUNTS.get('other_symbol', 0)} (an enum or a struct, not the declaration below)")
     if engine == "clang":
         print(f"  headers the compiler parsed: {COUNTS['clang_parsed']}")
         print(f"  headers it could not:   {COUNTS['clang_failed']}")

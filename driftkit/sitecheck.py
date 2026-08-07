@@ -16,6 +16,15 @@ Two independent questions, both asked BEFORE any detector runs:
      distinct people merge, how many open pull requests per merger, whether
      newcomers get in.
 
+THE RULES ARE NOT ALWAYS IN THE REPOSITORY. Astropy keeps its policy on AI
+contributions in a sibling repository of the organisation, astropy-project, and
+reading the clone alone said the door was open. Two patches were closed there.
+GitHub itself spreads a `.github` repository across the whole organisation, so
+this is not one project's quirk. Of the 97 owners in the pool, 29 keep such a
+repository, 6 keep `community`, 4 keep `governance`, and three organisations
+hold a document about AI outside the project (`--offline` skips this and says
+so).
+
 THE DISTINCTION THAT MATTERS. "Zero newcomers" means two different things.
 There is a queue and no newcomers get in: the door is closed. There is no queue
 and no newcomers: the door has simply never been pushed, and that is exactly
@@ -144,6 +153,9 @@ class Rules:
     dco: bool = False
     cla: bool = False
     checked: List[str] = dc_field(default_factory=list)
+    org_checked: List[str] = dc_field(default_factory=list)
+    org_files: List[str] = dc_field(default_factory=list)
+    org_error: str = ""
 
 
 @dataclass
@@ -194,6 +206,38 @@ def slug_of(root: str) -> Optional[str]:
     return None
 
 
+def scan_text(rules: Rules, label: str, text: str) -> None:
+    """One rule document, wherever it came from: the clone or the organisation.
+
+    `label` goes into every finding, so a report always says which file said it
+    and, for an organisation, which repository the file was in.
+    """
+    if not rules.ai_policy_file:
+        m = AI_SECTION.search(text)
+        if m and ai_section_is_strict(text, m.end()):
+            rules.ai_policy_file = (
+                f"{label}:{common.line_of(text, m.group(0).strip())} "
+                f"(section '{m.group(0).strip().lstrip('# ')[:40]}', with requirements)"
+            )
+        elif m:
+            rules.ai_section_soft = f"{label}: section '{m.group(0).strip().lstrip('# ')[:40]}' with no requirements"
+    if AI_MENTION.search(text):
+        rules.ai_mentioned_in.append(label)
+    if not rules.issue_required and ISSUE_REQUIRED.search(text):
+        m = ISSUE_REQUIRED.search(text)
+        rules.issue_required = f"{label}:{common.line_of(text, m.group(0))}"
+    if not rules.agent_trap and AGENT_TRAP.search(text):
+        m = AGENT_TRAP.search(text)
+        rules.agent_trap = f"{label}:{common.line_of(text, m.group(0))}"
+    if not rules.disclosure and AI_DISCLOSURE.search(text):
+        m = AI_DISCLOSURE.search(text)
+        rules.disclosure = f"{label}:{common.line_of(text, m.group(0))}"
+    if DCO.search(text):
+        rules.dco = True
+    if CLA.search(text):
+        rules.cla = True
+
+
 def read_rules(root: str) -> Rules:
     rules = Rules()
     for rel in AI_POLICY_FILES:
@@ -211,31 +255,141 @@ def read_rules(root: str) -> Rules:
         if not text:
             continue
         rules.checked.append(rel)
-        if not rules.ai_policy_file:
-            m = AI_SECTION.search(text)
-            if m and ai_section_is_strict(text, m.end()):
-                rules.ai_policy_file = (
-                    f"{rel}:{common.line_of(text, m.group(0).strip())} "
-                    f"(section '{m.group(0).strip().lstrip('# ')[:40]}', with requirements)"
-                )
-            elif m:
-                rules.ai_section_soft = f"{rel}: section '{m.group(0).strip().lstrip('# ')[:40]}' with no requirements"
-        if AI_MENTION.search(text):
-            rules.ai_mentioned_in.append(rel)
-        if not rules.issue_required and ISSUE_REQUIRED.search(text):
-            m = ISSUE_REQUIRED.search(text)
-            rules.issue_required = f"{rel}:{common.line_of(text, m.group(0))}"
-        if not rules.agent_trap and AGENT_TRAP.search(text):
-            m = AGENT_TRAP.search(text)
-            rules.agent_trap = f"{rel}:{common.line_of(text, m.group(0))}"
-        if not rules.disclosure and AI_DISCLOSURE.search(text):
-            m = AI_DISCLOSURE.search(text)
-            rules.disclosure = f"{rel}:{common.line_of(text, m.group(0))}"
-        if DCO.search(text):
-            rules.dco = True
-        if CLA.search(text):
-            rules.cla = True
+        scan_text(rules, rel, text)
     return rules
+
+
+# --------------------------------------------------------------------------
+# The rules of the organisation, one level above the project
+
+# Names measured across the 97 owners of the pool on 07.08, not guessed. The
+# two templated ones are the astropy case: an organisation names its meta
+# repository after itself.
+ORG_META_REPOS = (".github", "community", "governance", "{owner}-project", "{owner}-policies")
+
+# Where in such a repository the rules lie. A closed list on purpose: milvus
+# keeps `blog/en/building-a-production-ready-ai-assistant-...md` and four more
+# like it, and a search by name alone reads a blog post as a policy.
+ORG_LOOK_IN = frozenset({"", "doc", "docs", "policies", "policy", ".github", "profile"})
+
+_ORG_AI_DOC = re.compile(
+    r"^[^/]*\b(?:ai|llm)[-_ ]?(?:polic|usage|guidel|assist|generat)[^/]*\.(?:md|rst|txt)$", re.I
+)
+_ORG_RULE_DOC = re.compile(
+    r"^(?:CONTRIBUTING|AGENTS|CLAUDE|GOVERNANCE)\.(?:md|rst|txt)$|"
+    r"^(?:pull_request_template|PULL_REQUEST_TEMPLATE)\.(?:md|txt)$",
+    re.I,
+)
+_API = "https://api.github.com"
+UA = "driftkit-sitecheck/1.0"
+_token_cache: List[Optional[str]] = []
+
+
+def api_token() -> Optional[str]:
+    """A token lifts the anonymous limit of 60 requests an hour to 5000.
+
+    Works without one; five requests per project means twelve projects an hour.
+    """
+    if _token_cache:
+        return _token_cache[0]
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if not tok:
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            tok = r.stdout.strip()
+    _token_cache.append(tok or None)
+    return _token_cache[0]
+
+
+def api_json(path: str, timeout: float = 20.0):
+    """One GitHub API call. A separate function so a test can replace it."""
+    import urllib.error
+    import urllib.request
+
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    tok = api_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request(f"{_API}/{path.lstrip('/')}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        return {"_error": f"http {e.code}"}
+    except Exception as e:  # noqa: BLE001
+        return {"_error": f"net:{type(e).__name__}"}
+
+
+def _worth_reading(path: str) -> bool:
+    head, _, name = path.rpartition("/")
+    if head not in ORG_LOOK_IN:
+        return False
+    return bool(_ORG_AI_DOC.match(name) or _ORG_RULE_DOC.match(name))
+
+
+_org_cache: Dict[str, tuple] = {}
+
+
+def org_rule_texts(owner: str) -> tuple:
+    """Rule documents of the organisation: {"owner/repo:path": text}, repos read, error.
+
+    One tree request per candidate repository; the ones that do not exist answer
+    404 and cost nothing. A truncated tree is reported rather than passed off as
+    "nothing found" -- those are different statements.
+    """
+    if owner in _org_cache:   # a sweep holds several projects of one owner
+        return _org_cache[owner]
+    texts: Dict[str, str] = {}
+    read: List[str] = []
+    problems: List[str] = []
+    for tmpl in ORG_META_REPOS:
+        repo = tmpl.format(owner=owner)
+        slug = f"{owner}/{repo}"
+        tree = api_json(f"repos/{slug}/git/trees/HEAD?recursive=1")
+        if not isinstance(tree, dict) or "_error" in tree:
+            err = (tree or {}).get("_error", "no answer")
+            if not err.startswith("http 404"):
+                problems.append(f"{slug}: {err}")
+            continue
+        read.append(slug + (" (tree truncated)" if tree.get("truncated") else ""))
+        for item in tree.get("tree", []):
+            if item.get("type") != "blob" or not _worth_reading(item["path"]):
+                continue
+            blob = api_json(f"repos/{slug}/git/blobs/{item['sha']}")
+            if not isinstance(blob, dict) or "_error" in blob:
+                problems.append(f"{slug}:{item['path']}: unreadable")
+                continue
+            import base64
+            try:
+                body = base64.b64decode(blob.get("content", "")).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                continue
+            texts[f"{slug}:{item['path']}"] = body
+    out = (texts, read, "; ".join(problems))
+    # A failed read is never cached: a network blink would otherwise pass for
+    # "the organisation is clean" for the rest of the sweep.
+    if not problems:
+        _org_cache[owner] = out
+    return out
+
+
+def read_org_rules(rules: Rules, slug: str) -> None:
+    """Adds the rules of the organisation to what the clone already said."""
+    owner = slug.split("/")[0]
+    texts, read, err = org_rule_texts(owner)
+    rules.org_checked = read
+    rules.org_error = err
+    # Which files were actually opened. Without this "the organisation says
+    # nothing" is indistinguishable from "not a single file was read", and that
+    # confusion has already cost this kit twice.
+    rules.org_files = list(texts)
+    for label, text in texts.items():
+        name = label.rpartition("/")[2]
+        if not rules.ai_policy_file and _ORG_AI_DOC.match(name):
+            # A dedicated document, the same as one inside the project
+            rules.ai_policy_file = label
+            continue
+        scan_text(rules, label, text)
 
 
 def liveness_module() -> Optional[str]:
@@ -270,6 +424,14 @@ def measure(slug: str) -> Optional[dict]:
 
 def check(root: str, offline: bool = False) -> Site:
     site = Site(path=os.path.abspath(root), rules=read_rules(root), slug=slug_of(root))
+    # The organisation is asked before liveness: its rules can close the door
+    # the clone left open, and then there is nothing to measure.
+    if offline:
+        site.rules.org_error = "network disabled, the organisation was not read"
+    elif not site.slug:
+        site.rules.org_error = "no repository resolved, the organisation was not read"
+    elif not site.rules.ai_policy_file or not site.rules.issue_required:
+        read_org_rules(site.rules, site.slug)
     if offline or not site.slug or site.blocked:
         if site.blocked:
             site.score_error = "rules block the approach, no point measuring liveness"
@@ -295,6 +457,12 @@ def print_report(site: Site, verbose: bool = False) -> None:
     print(f"  verdict:                {site.verdict}")
     r = site.rules
     print(f"  rule files read:        {len(r.checked)}" + (f" ({', '.join(r.checked)})" if verbose else ""))
+    if r.org_checked:
+        print(f"  organisation read:      {', '.join(r.org_checked)}")
+        print(f"  its rule files read:    {len(r.org_files)}"
+              + (f" ({', '.join(r.org_files)})" if verbose and r.org_files else ""))
+    if r.org_error:
+        print(f"  organisation:           {r.org_error}")
     if r.ai_policy_file:
         print(f"  AI policy:              {r.ai_policy_file}, we walk past")
     elif r.ai_section_soft:
@@ -350,6 +518,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "disclosure": site.rules.disclosure,
                         "dco": site.rules.dco, "cla": site.rules.cla,
                         "checked": site.rules.checked,
+                        "org_checked": site.rules.org_checked,
+                        "org_files": site.rules.org_files,
+                        "org_error": site.rules.org_error,
                     },
                     "score": site.score,
                 }],

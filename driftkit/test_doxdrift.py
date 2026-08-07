@@ -573,5 +573,109 @@ class TestSuppressionMeasured(unittest.TestCase):
         self.assertEqual([h["name"] for h in doxdrift.scan_text(src, "a.hpp")], ["nosuch"])
 
 
+class TestGtkDoc(unittest.TestCase):
+    """gtk-doc: the same species of defect, another syntax.
+
+    Measured on harfbuzz, 7 August 2026. Before this the tool read 336 headers
+    there and reported "0 blocks with \\param", which is what blindness looks
+    like from the outside: the project documents in gtk-doc and keeps the
+    documentation next to the body in .cc rather than in the header.
+
+    Every false finding below was seen in that run, in this order:
+      429 -> the prototype prototype read `typedef void (*name)(args)` wrong;
+      106 -> `HB_TAG(c1,c2,c3,c4)` compared against the next real declaration;
+       13 -> `/* OUT */` inside the argument list read as an argument name;
+        8 -> `(hb_color_get_alpha) (hb_color_t color)`, the name in parentheses;
+        5 -> `const hb_gpu_draw_t *draw HB_UNUSED`, the attribute read as a name;
+        3 -> the block measured against the definition rather than the header;
+       65 -> a gtk-doc block over an enum, its members read as parameters;
+        0 -> what is actually there.
+    """
+
+    def setUp(self):
+        doxdrift.HEADER_SIGS.clear()
+
+    def test_a_gtk_doc_parameter_is_read(self):
+        src = ("/**\n * hb_thing_do:\n * @thing: a thing\n * @nosuch: not an argument\n"
+               " *\n * Does it.\n */\nvoid hb_thing_do (hb_thing_t *thing);\n")
+        self.assertEqual([h["name"] for h in doxdrift.scan_text(src, "a.h")], ["nosuch"])
+
+    def test_the_fields_of_the_block_are_not_parameters(self):
+        src = ("/**\n * hb_thing_do:\n * @thing: a thing\n *\n * Does it.\n"
+               " *\n * Return value: nothing\n * Since: 1.0.0\n * Deprecated: 2.0.0\n */\n"
+               "void hb_thing_do (hb_thing_t *thing);\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_a_section_block_is_not_a_function(self):
+        src = ("/**\n * SECTION:hb-buffer\n * @title: hb-buffer\n"
+               " * @short_description: Input and output buffers\n"
+               " * @include: hb.h\n */\nvoid hb_thing_do (hb_thing_t *thing);\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_a_documented_macro_is_compared_against_the_define(self):
+        """HB_TAG(c1,c2,c3,c4) sits above an unrelated function."""
+        src = ("/**\n * HB_TAG:\n * @c1: 1st character\n * @c2: 2nd character\n */\n"
+               "#define HB_TAG(c1,c2) ((hb_tag_t)(c1))\n\n"
+               "hb_tag_t hb_tag_from_string (const char *str, int len);\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_a_renamed_macro_parameter_is_still_found(self):
+        """The macro rule is not a way to fall silent: it changes what to
+        compare against, and a real mismatch there is still reported."""
+        src = ("/**\n * HB_TAG:\n * @c1: 1st character\n * @nosuch: 2nd character\n */\n"
+               "#define HB_TAG(c1,c2) ((hb_tag_t)(c1))\n\n"
+               "hb_tag_t hb_tag_from_string (const char *str, int len);\n")
+        self.assertEqual([h["name"] for h in doxdrift.scan_text(src, "a.h")], ["nosuch"])
+
+    def test_a_comment_inside_the_argument_list_is_not_a_name(self):
+        """`hb_tag_t *table_tags /* OUT */` was read as an argument named OUT."""
+        src = ("/**\n * hb_face_get_table_tags:\n * @face: a face\n"
+               " * @table_tags: the tags\n */\n"
+               "unsigned hb_face_get_table_tags (hb_face_t *face,\n"
+               "                                 hb_tag_t *table_tags /* OUT */);\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_a_name_in_parentheses_is_not_the_argument_list(self):
+        """`uint8_t (hb_color_get_alpha) (hb_color_t color)` shields a macro."""
+        src = ("/**\n * hb_color_get_alpha:\n * @color: a color\n */\n"
+               "uint8_t\n(hb_color_get_alpha) (hb_color_t color)\n{\n  return 0;\n}\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_an_attribute_macro_after_the_name_is_not_the_name(self):
+        src = ("/**\n * hb_gpu_draw_get_funcs:\n * @draw: a context\n */\n"
+               "hb_draw_funcs_t *\nhb_gpu_draw_get_funcs (const hb_gpu_draw_t *draw HB_UNUSED)\n{\n}\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_the_members_of_an_enum_are_not_parameters(self):
+        src = ("/**\n * hb_paint_extend_t:\n * @HB_PAINT_EXTEND_PAD: pad\n"
+               " * @HB_PAINT_EXTEND_REPEAT: repeat\n */\n"
+               "typedef enum {\n  HB_PAINT_EXTEND_PAD,\n} hb_paint_extend_t;\n")
+        self.assertEqual(findings_in(src), [])
+
+    def test_the_public_prototype_wins_over_the_local_definition(self):
+        """A C library may name the arguments of a definition differently.
+
+        harfbuzz declares `coords_length` in hb-font.h and defines
+        `input_coords_length` in hb-font.cc. The block documents the header, and
+        it is right to.
+        """
+        doxdrift._remember_header_sigs(
+            "void hb_font_set_var_coords_design (hb_font_t *font,\n"
+            "                                    const float *coords,\n"
+            "                                    unsigned int coords_length);\n")
+        src = ("/**\n * hb_font_set_var_coords_design:\n * @font: a font\n"
+               " * @coords: the coordinates\n * @coords_length: how many\n */\n"
+               "void\nhb_font_set_var_coords_design (hb_font_t *font,\n"
+               "                                const float *coords,\n"
+               "                                unsigned int input_coords_length)\n{\n}\n")
+        self.assertEqual(doxdrift.scan_text(src, "hb-font.cc", gtk_only=True), [])
+
+    def test_an_implementation_file_is_read_for_gtk_doc_only(self):
+        """Doxygen in a .cc stays unread, so no other project's report moves."""
+        src = "/** Does it.\n * \\param nosuch nothing\n */\nvoid f (int real) {}\n"
+        self.assertEqual(doxdrift.scan_text(src, "a.cc", gtk_only=True), [])
+        self.assertEqual([h["name"] for h in doxdrift.scan_text(src, "a.hpp")], ["nosuch"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

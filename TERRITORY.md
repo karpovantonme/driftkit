@@ -37,17 +37,19 @@ So the rule is: **if any name below appears as the owner of the repository you a
 | `boostorg/*` | 15 |
 | `supabase/*` | 5 |
 | `astropy/*` | 4 |
-| `mne-tools/*` | 3 |
 | `nilearn/*` | 3 |
-| `GyulyVGC/*` | 2 |
-| `cadet/*` | 2 |
-| `flekschas/*` | 2 |
-| `kubernetes/*` | 2 |
-| `networkx/*` | 2 |
-| `nf-core/*` | 2 |
+| `networkx/*` | 3 |
+| `mne-tools/*` | 3 |
+| `statsmodels/*` | 2 |
 | `prometheus/*` | 2 |
+| `opencv/*` | 2 |
+| `nf-core/*` | 2 |
+| `kubernetes/*` | 2 |
+| `GyulyVGC/*` | 2 |
+| `flekschas/*` | 2 |
+| `cadet/*` | 2 |
 
-Plus one pull request each in: `AFLplusplus`, `ARC-OPT`, `DLR-AMR`, `ESMValGroup`, `JetBrains`, `adtzlr`, `alan-turing-institute`, `deepinv`, `e2b-dev`, `etcd-io`, `hajimes`, `ibis-project`, `idaholab`, `karmada-io`, `koide3`, `mlco2`, `open-telemetry`, `opencv`, `pandas-dev`, `posit-dev`, `rclone`, `scverse`, `statsmodels`, `supabase-community`, `thanos-io`, `traefik`, `vprusso`, `weaviate`, `xgi-org`.
+Plus one pull request each in: `adtzlr`, `AFLplusplus`, `alan-turing-institute`, `ARC-OPT`, `bazelbuild`, `deepinv`, `DLR-AMR`, `e2b-dev`, `ESMValGroup`, `etcd-io`, `go-gorm`, `golang`, `google`, `hajimes`, `ibis-project`, `idaholab`, `JetBrains`, `karmada-io`, `koide3`, `microsoft`, `mlco2`, `open-telemetry`, `OpenMD`, `pandas-dev`, `posit-dev`, `prashjha`, `qutip`, `RBVI`, `rclone`, `scverse`, `spf13`, `supabase-community`, `thanos-io`, `TheAlgorithms`, `traefik`, `vprusso`, `weaviate`, `xgi-org`, `zellij-org`.
 
 ### Projects with pull requests open or merged
 

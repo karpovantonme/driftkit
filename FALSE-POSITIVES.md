@@ -5,7 +5,7 @@
 ## Why this file exists
 
 The kit, eleven detectors and five pipeline stages, was not written out of lucky
-guesses. It was written out of **reading the places where it lied**. Sixty-eight
+guesses. It was written out of **reading the places where it lied**. A hundred and nineteen
 worked cases so far, and not one of them came from imagination: every one turned
 up on a live project, was read by hand, and only then became a rule and a test.
 
@@ -145,6 +145,16 @@ sent to maintainers if nobody had read them.
 | 93 | syncdrift | `unsafe.Sizeof` parsed as the file `unsafe.S` plus a symbol | 6 on the first Go run | The extension must end the word |
 | 94 | syncdrift | The guard from case 93 also rejected a path ending a sentence: `... in gc/noder.go.` | 2 real findings went invisible, in the very tree where they had just been found | `(?!\w)(?!\.\w)` instead of `(?![\w.])`, plus a regression run against a known finding after every tightening |
 | 95 | syncdrift | A shortened path naming a sibling package: `ssa/html.go` from inside `cmd/compile/internal/ir` | 1 on Go | Resolve by unique suffix in the tree; two matches mean silence, not a guess |
+| 110 | doxdrift | gtk-doc syntax unread: `@name: text` under a line naming the symbol, and the documentation kept in `.c`/`.cc` next to the body | harfbuzz 336 headers read, "0 blocks", 0 findings; the whole gtk-doc family invisible -- GLib, GTK, GStreamer, pango, libsoup | A second syntax, plus implementation files read for that syntax only |
+| 111 | doxdrift | A `typedef` of a function pointer read as a one-argument function | 429 on harfbuzz in a stand-alone prototype | Nothing: the kit already handled it since case 79, and the prototype written apart from it walked into the same mine |
+| 112 | doxdrift | A block documenting a function-like macro, compared against the next real declaration because `#define` is stripped | 106 on harfbuzz, `HB_TAG(c1,c2,c3,c4)` against `hb_tag_from_string (str, len)` | Compare against the parameters of the `#define` itself |
+| 113 | doxdrift | A comment inside the argument list: `hb_tag_t *table_tags /* OUT */` | 13 on harfbuzz, every annotated argument read as one named `OUT` | Comments stripped from the declaration before the parse |
+| 114 | doxdrift | The name of a function in parentheses, shielding it from a macro of the same name: `uint8_t (hb_color_get_alpha) (hb_color_t color)` | 8 on harfbuzz, reported as "in the declaration: (empty)" | A bare name in parentheses followed by another list is a declarator |
+| 115 | doxdrift | An attribute macro after the name: `const hb_gpu_draw_t *draw HB_UNUSED` | 5 on harfbuzz | The same rule as the macro with arguments, without the parentheses |
+| 116 | doxdrift | The block measured against the definition below it while gtk-doc documents the PUBLIC prototype | 3 on harfbuzz: `coords_length` in hb-font.h against `input_coords_length` in hb-font.cc | Index the headers first and compare against the declaration from there |
+| 117 | doxdrift | A gtk-doc block over an enum: its members read as parameters of the function underneath | 65 on harfbuzz, 62 on glib, 26 on libsoup | The block names the symbol it documents; a different name means it is not about that declaration |
+| 118 | doxdrift, the header index | A field of a struct of callbacks indexed as a prototype: `GIOStatus (*io_write) (GIOChannel *channel, ...)` taught the tool that the TYPE takes those arguments | 12 on glib, every block about that enum measured against them | Chunks holding `(*` are not prototypes; conflicting prototypes of one name silence it |
+| 119 | doxdrift, the header index | A `#define` above a prototype carries no `;`, so it landed in the same chunk and the chunk was dropped whole | `g_array_new` and its neighbours missing from the index on glib | Strip the directives instead of dropping the chunk |
 | 88 | numpydoc, the reference parser | With no blank line before `Returns` the two sections run together and `Returns` becomes a parameter | 40 or so across the pool | Recorded rather than fixed: our own rule is the exact one here |
 
 Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
