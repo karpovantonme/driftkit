@@ -321,6 +321,40 @@ class TestOrganisation(unittest.TestCase):
         sc.read_org_rules(second, "someone/other")
         self.assertTrue(second.issue_required, "the failure was cached as an answer")
 
+    def test_a_read_only_mirror_is_a_stop(self):
+        """GNOME keeps glib, pango and libsoup on gitlab.gnome.org.
+
+        Their GitHub repositories say so in one line of the description and
+        take no pull requests at all. Read on 07.08 after a full sweep of four
+        of them: the code was checked, the findings were real, and there was
+        nowhere to send them.
+        """
+        def meta(path, timeout=20.0):
+            if path == "repos/GNOME/glib":
+                return {"description": "Read-only mirror of https://gitlab.gnome.org/GNOME/glib"}
+            return {"_error": "http 404"}
+        sc.api_json = meta
+        rules = sc.Rules()
+        sc.read_mirror(rules, "GNOME/glib")
+        self.assertTrue(rules.mirror)
+        self.assertIn("gitlab.gnome.org", rules.mirror)
+
+    def test_an_ordinary_description_is_not_a_mirror(self):
+        def meta(path, timeout=20.0):
+            return {"description": "A fast text shaping engine", "homepage": "https://harfbuzz.github.io"}
+        sc.api_json = meta
+        rules = sc.Rules()
+        sc.read_mirror(rules, "harfbuzz/harfbuzz")
+        self.assertIsNone(rules.mirror)
+
+    def test_an_archived_repository_is_a_stop_too(self):
+        def meta(path, timeout=20.0):
+            return {"description": "An old thing", "archived": True}
+        sc.api_json = meta
+        rules = sc.Rules()
+        sc.read_mirror(rules, "someone/thing")
+        self.assertIn("archived", rules.mirror)
+
 
 class TestOnRealClones(unittest.TestCase):
     """Projects whose verdicts are already written down."""

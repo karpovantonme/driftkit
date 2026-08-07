@@ -635,6 +635,11 @@ def _headers(base: pathlib.Path):
 # header. Comparing it against the definition it happens to sit above reported
 # three findings that were the tool's error rather than the project's.
 HEADER_SIGS: Dict[str, List[str]] = {}
+# A real class declaration, not the word in a comment. Matching the bare word
+# threw away pango-layout.h, which says "class" in prose about font classes,
+# and with it every prototype spelling `index_` -- 8 false findings that named
+# the very difference the header exists to declare.
+CXX_CLASS = re.compile(r'^\s*(?:template\s*<[^>]*>\s*)?class\s+\w+', re.M)
 NAME_BEFORE_PAREN = re.compile(r'([A-Za-z_]\w*)\s*$')
 
 
@@ -709,7 +714,7 @@ def scan(root: str) -> List[dict]:
         # The public C interface only. harfbuzz keeps its C++ internals in .hh
         # with methods of the same names, and mixing the two indexes gave 12
         # findings where a comment was measured against an unrelated signature.
-        if p.suffix == ".h" and "class " not in src:
+        if p.suffix == ".h" and not CXX_CLASS.search(src):
             _remember_header_sigs(src)
         hits.extend(scan_text(src, str(p.relative_to(base))))
 

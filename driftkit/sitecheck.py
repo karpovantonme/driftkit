@@ -156,6 +156,7 @@ class Rules:
     org_checked: List[str] = dc_field(default_factory=list)
     org_files: List[str] = dc_field(default_factory=list)
     org_error: str = ""
+    mirror: Optional[str] = None
 
 
 @dataclass
@@ -169,6 +170,8 @@ class Site:
     @property
     def verdict(self) -> str:
         stops = []
+        if self.rules.mirror:
+            stops.append(f"a mirror, pull requests go elsewhere: {self.rules.mirror}")
         if self.rules.issue_required:
             stops.append("pre-approved issue required")
         if self.rules.ai_policy_file:
@@ -190,7 +193,8 @@ class Site:
 
     @property
     def blocked(self) -> bool:
-        return bool(self.rules.ai_policy_file or self.rules.issue_required)
+        return bool(self.rules.ai_policy_file or self.rules.issue_required
+                    or self.rules.mirror)
 
 
 # --------------------------------------------------------------------------
@@ -373,6 +377,34 @@ def org_rule_texts(owner: str) -> tuple:
     return out
 
 
+# A repository that only mirrors another forge takes no pull requests at all,
+# and no amount of reading its rules will say so: the rules it carries are the
+# rules of the real home. GNOME states it in the description of every mirror,
+# "Read-only mirror of https://gitlab.gnome.org/GNOME/glib". Found the hard way
+# on 07.08 after a full sweep of glib, pango, libsoup and json-glib, all four
+# of which live on gitlab.gnome.org.
+MIRROR = re.compile(
+    r"read[- ]only mirror|mirror of\s+http|"
+    r"official (?:git )?repository (?:is|lives) at|"
+    r"development (?:happens|takes place) (?:on|at)\s+http|"
+    r"do not (?:send|open) pull requests here",
+    re.I,
+)
+
+
+def read_mirror(rules: Rules, slug: str) -> None:
+    """Whether this repository is a mirror of a home somewhere else."""
+    meta = api_json(f"repos/{slug}")
+    if not isinstance(meta, dict) or "_error" in meta:
+        return
+    text = " ".join(str(meta.get(k) or "") for k in ("description", "homepage"))
+    m = MIRROR.search(text)
+    if m:
+        rules.mirror = text.strip()[:160]
+    elif meta.get("archived"):
+        rules.mirror = "archived: the repository is read-only"
+
+
 def read_org_rules(rules: Rules, slug: str) -> None:
     """Adds the rules of the organisation to what the clone already said."""
     owner = slug.split("/")[0]
@@ -430,8 +462,10 @@ def check(root: str, offline: bool = False) -> Site:
         site.rules.org_error = "network disabled, the organisation was not read"
     elif not site.slug:
         site.rules.org_error = "no repository resolved, the organisation was not read"
-    elif not site.rules.ai_policy_file or not site.rules.issue_required:
-        read_org_rules(site.rules, site.slug)
+    else:
+        read_mirror(site.rules, site.slug)
+        if not site.rules.ai_policy_file or not site.rules.issue_required:
+            read_org_rules(site.rules, site.slug)
     if offline or not site.slug or site.blocked:
         if site.blocked:
             site.score_error = "rules block the approach, no point measuring liveness"
@@ -463,6 +497,8 @@ def print_report(site: Site, verbose: bool = False) -> None:
               + (f" ({', '.join(r.org_files)})" if verbose and r.org_files else ""))
     if r.org_error:
         print(f"  organisation:           {r.org_error}")
+    if r.mirror:
+        print(f"  a mirror:               {r.mirror}")
     if r.ai_policy_file:
         print(f"  AI policy:              {r.ai_policy_file}, we walk past")
     elif r.ai_section_soft:
@@ -521,6 +557,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "org_checked": site.rules.org_checked,
                         "org_files": site.rules.org_files,
                         "org_error": site.rules.org_error,
+                        "mirror": site.rules.mirror,
                     },
                     "score": site.score,
                 }],

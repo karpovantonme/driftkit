@@ -5,7 +5,7 @@
 ## Why this file exists
 
 The kit, eleven detectors and five pipeline stages, was not written out of lucky
-guesses. It was written out of **reading the places where it lied**. A hundred and nineteen
+guesses. It was written out of **reading the places where it lied**. A hundred and twenty
 worked cases so far, and not one of them came from imagination: every one turned
 up on a live project, was read by hand, and only then became a rule and a test.
 
@@ -155,6 +155,7 @@ sent to maintainers if nobody had read them.
 | 117 | doxdrift | A gtk-doc block over an enum: its members read as parameters of the function underneath | 65 on harfbuzz, 62 on glib, 26 on libsoup | The block names the symbol it documents; a different name means it is not about that declaration |
 | 118 | doxdrift, the header index | A field of a struct of callbacks indexed as a prototype: `GIOStatus (*io_write) (GIOChannel *channel, ...)` taught the tool that the TYPE takes those arguments | 12 on glib, every block about that enum measured against them | Chunks holding `(*` are not prototypes; conflicting prototypes of one name silence it |
 | 119 | doxdrift, the header index | A `#define` above a prototype carries no `;`, so it landed in the same chunk and the chunk was dropped whole | `g_array_new` and its neighbours missing from the index on glib | Strip the directives instead of dropping the chunk |
+| 120 | sitecheck | A read-only mirror read as a live project: rules fine, liveness fine, and no pull request can be opened at all | A full sweep of glib, pango, libsoup and json-glib before anyone noticed the one line in the description | The description and homepage are read: "Read-only mirror of https://gitlab.gnome.org/GNOME/glib". Zero mirrors among our own 151 sites, so this guards the future rather than the past |
 | 88 | numpydoc, the reference parser | With no blank line before `Returns` the two sections run together and `Returns` becomes a parameter | 40 or so across the pool | Recorded rather than fixed: our own rule is the exact one here |
 
 Cases 65 and 66 came out of the first real network run: astroquery reported 101 findings out of 897 addresses and 72 of them were false, in those two mechanisms. Twenty-nine candidates were left, which is a workable number for reading by hand.
