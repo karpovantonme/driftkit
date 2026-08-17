@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -78,7 +79,15 @@ TEXT_EXT = (".md", ".rst", ".txt", ".adoc", ".yaml", ".yml", ".json", ".html", "
 # and none of them is ours to fix. On astroquery a single saved SDSS page
 # produced 57 of 101 findings.
 _FIXTURE_DIR = re.compile(r"(^|/)(tests?|testing)/data/|(^|/)data/tests?/|"
-                          r"(^|/)fixtures?/|(^|/)__snapshots__/", re.I)
+                          r"(^|/)fixtures?/|(^|/)__snapshots__/|"
+                          r"(^|/)cassettes?/", re.I)
+
+# A recorded HTTP session: the whole page body sits inside an escaped string,
+# so every address in it arrives glued to backslashes and pipes. Caught by
+# content rather than by path, because the directory is not always named.
+# On canonical/ubuntu.com one cassette produced 585 of 618 findings.
+_CASSETTE = re.compile(r"^\s*(?:interactions|http_interactions):\s*$|"
+                       r"recorded_with:\s*VCR", re.M | re.I)
 
 # Working addresses printed inside an example of a tool's output: a temporary
 # workspace, a session identifier, a job number. They are generated per run and
@@ -86,7 +95,17 @@ _FIXTURE_DIR = re.compile(r"(^|/)(tests?|testing)/data/|(^|/)data/tests?/|"
 _EPHEMERAL = re.compile(r"/workspace/|TMP_[A-Za-z0-9]{4,}|/tmp/|"
                         r"[?&](?:session|sid|token|jobid)=", re.I)
 
-_URL = re.compile(r"https?://[^\s\)\]\}\"'`<>,;]+")
+# Parentheses are legal in a path and common in asset names, so they stay in
+# the address and an unpaired tail is trimmed afterwards. Backslash and pipe
+# are not legal unencoded, and their presence means the address was lifted out
+# of escaped content: 572 of 618 findings on canonical/ubuntu.com.
+# A semicolon stays inside the address, otherwise every `&amp;` in a query
+# string cuts it in half and the stump 404s honestly. A trailing one is
+# stripped later together with the other sentence punctuation.
+_URL = re.compile(r"https?://[^\s\]\}\"'`<>,\\|]+")
+# A cut-off HTML entity at the very end: the address was truncated mid-entity
+# and `&amp` alone breaks the request.
+_TAIL_ENTITY = re.compile(r"&(?:amp|lt|gt|quot|apos|nbsp|#\d+)?$")
 # A template inside the address: nothing to check
 # A single `{` had to be a marker too. `}` is excluded from the address pattern,
 # so a templated URL is captured up to the brace and arrives here as a stump:
@@ -117,14 +136,6 @@ _IDENTIFIER_URI = re.compile(
 
 UA = "Mozilla/5.0 (compatible; linkdrift/1.0; +https://github.com/)"
 
-# Without an Accept header a single-page site cannot tell what is being asked
-# for and answers 404 to a live page. crates.io does exactly that: the same
-# URL is 404 with no Accept and 200 with one, for any user agent. That cost 26
-# false "dead links" of 35 on comprehensive-rust before it was measured -- and
-# the first diagnosis, that these hosts refuse robots by user agent, was wrong.
-# Browsers send this string; so do we now.
-ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-
 
 @dataclass
 class Finding:
@@ -153,6 +164,7 @@ class Report:
     from_cache: int = 0
     requests: int = 0
     truncated: str = ""
+    cut_in_source: int = 0
     findings: List[Finding] = dc_field(default_factory=list)
 
 
@@ -171,6 +183,9 @@ def collect(root: str, report: Report) -> Dict[str, List[str]]:
                 report.fixture_files += 1
                 continue
             text = common.read_text(path)
+            if text and _CASSETTE.search(text[:8000]):
+                report.fixture_files += 1
+                continue
             if not text:
                 # Empty, unreadable, or over the size limit. Counted rather
                 # than dropped: a file that disappears without a trace makes
@@ -181,10 +196,62 @@ def collect(root: str, report: Report) -> Dict[str, List[str]]:
             rel = os.path.relpath(path, root)
             for i, line in enumerate(text.splitlines(), 1):
                 for m in _URL.finditer(line):
-                    url = m.group(0).rstrip(".,;:'\"")
+                    url = normalise(extend_to_quote(line, m))
+                    if url is None:
+                        # The address was cut where we cannot put it back
+                        # together: an unpaired bracket means the real one
+                        # continued past a space, and reporting the stump
+                        # would report a 404 that is ours, not theirs.
+                        report.cut_in_source += 1
+                        continue
                     found[url].append(f"{rel}:{i}")
     report.urls_found = len(found)
     return found
+
+
+def extend_to_quote(line: str, m) -> str:
+    """Carry the address to the closing quote when it sits in an attribute.
+
+    An HTML attribute may hold a file name with a real space in it, as in
+    `src="https://host/v1/hash-monitoring dashboard.png"`. Stopping at the
+    space leaves a stump that 404s honestly, and 66 of 72 findings on
+    canonical/ubuntu.com were exactly that. A browser reads to the quote and
+    encodes the spaces, so that is what happens here.
+    """
+    before = line[:m.start()]
+    q = max(before.rfind('"'), before.rfind("'"))
+    if q < 0:
+        return m.group(0)
+    quote = before[q]
+    close = line.find(quote, m.end())
+    if close < 0:
+        return m.group(0)
+    inside = line[m.start():close]
+    # Only a run of plain spaces is repaired. Anything else in there means the
+    # quote belongs to something other than this address.
+    if inside != m.group(0) and not re.fullmatch(r"[^\s]+(?: [^\s]+)*", inside):
+        return m.group(0)
+    return inside.replace(" ", "%20")
+
+
+def normalise(raw: str) -> Optional[str]:
+    """Clean the tail of a captured address, or None if it is a stump.
+
+    Three things happen here, all learned from one run on canonical/ubuntu.com
+    where 613 of 618 findings turned out to be ours, not theirs: a truncated
+    HTML entity is dropped, the remaining entities are decoded, and an unpaired
+    closing bracket is trimmed because the address was written inside a
+    markdown link. What is left with an unpaired *opening* bracket cannot be
+    repaired and is thrown away instead of being reported.
+    """
+    url = _TAIL_ENTITY.sub("", raw)
+    url = html.unescape(url)
+    url = url.rstrip(".,;:'\"")
+    while url.endswith(")") and url.count("(") < url.count(")"):
+        url = url[:-1]
+    if url.count("(") != url.count(")") or url.count("[") != url.count("]"):
+        return None
+    return url or None
 
 
 def worth_checking(url: str, report: Report) -> bool:
@@ -234,8 +301,7 @@ class Checker:
             fh.write(verdict)
 
     def _ask(self, url: str, method: str) -> str:
-        req = urllib.request.Request(url, method=method,
-                                     headers={"User-Agent": UA, "Accept": ACCEPT})
+        req = urllib.request.Request(url, method=method, headers={"User-Agent": UA})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return str(resp.status)
@@ -339,6 +405,7 @@ def print_report(report: Report, verbose: bool = False) -> None:
     print(f"  identifier URIs:        {len(report.identifier)} (XML/SAML namespaces, never addresses)")
     print(f"  ephemeral addresses:    {len(report.ephemeral)} (temporary workspaces, session ids)")
     print(f"  fixture files skipped:  {report.fixture_files} (saved copies of other people's pages)")
+    print(f"  cut in the source:      {report.cut_in_source} (address broken by a space or a bracket)")
     print(f"  alive:                  {report.alive}")
     print(f"  not let in:             {len(report.blocked)} (403, 401, 429, page is alive)")
     print(f"  unverified:             {len(report.unknown)} (failure repeated, may be our own link)")

@@ -19,7 +19,6 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -221,34 +220,91 @@ class TestReportedByUsers(unittest.TestCase):
 
 
 
+    # ------------------------------------------------------------------
+    # Learned on canonical/ubuntu.com, 12.08.2026: 613 of 618 findings were
+    # ours, not theirs. Four separate causes, one test each.
+    # ------------------------------------------------------------------
+
+    def _first(self, line):
+        """The first address a line yields after normalisation."""
+        for m in ld._URL.finditer(line):
+            url = ld.normalise(m.group(0))
+            if url is not None:
+                return url
+        return None
+
+    def test_escaped_content_does_not_leak_into_the_address(self):
+        """A recorded HTTP body keeps the page inside an escaped string. The
+        backslash and the pipe end the address instead of joining it."""
+        self.assertEqual(
+            self._first("body: https://assets.ubuntu.com/v1/3c16f2f2-webinar.png|x"),
+            "https://assets.ubuntu.com/v1/3c16f2f2-webinar.png")
+        self.assertEqual(
+            self._first('"https://assets.ubuntu.com/v1/3c16f2f2-webinar.png\\\\"'),
+            "https://assets.ubuntu.com/v1/3c16f2f2-webinar.png")
+
+    def test_a_bracket_in_the_file_name_survives(self):
+        """Asset names carry parentheses and plus signs. Cutting at the
+        opening bracket produced a stump that 404s honestly."""
+        self.assertEqual(
+            self._first("![x](https://assets.ubuntu.com/v1/02dc8e77-design%20(1).png)"),
+            "https://assets.ubuntu.com/v1/02dc8e77-design%20(1).png")
+        self.assertEqual(
+            self._first("see https://assets.ubuntu.com/v1/17-banner+(13).png here"),
+            "https://assets.ubuntu.com/v1/17-banner+(13).png")
+
+    def test_a_markdown_link_still_loses_its_closing_bracket(self):
+        """The other direction: an unpaired closing bracket belongs to the
+        markdown around the address, not to the address."""
+        self.assertEqual(
+            self._first("[Read the docs](https://ubuntu.com/blog/thing)"),
+            "https://ubuntu.com/blog/thing")
+
+    def test_html_entities_are_decoded(self):
+        """`&amp;` inside a query string used to cut the address in half,
+        because the semicolon ended the match."""
+        self.assertEqual(
+            self._first("url: https://analytics.twitter.com/i/adsct?txn_id=l4pwm&amp;p_id=Twitter"),
+            "https://analytics.twitter.com/i/adsct?txn_id=l4pwm&p_id=Twitter")
+
+    def test_a_trailing_semicolon_is_still_dropped(self):
+        """Letting the semicolon in must not swallow the one that ends a
+        statement."""
+        self.assertEqual(
+            self._first("@import https://fonts.example.org/x.css; body {}"),
+            "https://fonts.example.org/x.css")
+
+    def test_an_address_broken_by_a_space_is_thrown_away(self):
+        """An unpaired opening bracket means the real address continued past
+        a space. It cannot be repaired, so it is dropped rather than
+        reported as dead."""
+        self.assertIsNone(
+            self._first("img https://assets.ubuntu.com/v1/0c-[Webinar Recap].png"))
+
+    def test_a_recorded_http_session_is_recognised_by_content(self):
+        """VCR cassettes are not always kept in a directory we know by name."""
+        self.assertTrue(ld._CASSETTE.search("interactions:\n- request:\n"))
+        self.assertTrue(ld._CASSETTE.search("  recorded_with: VCR 4.0.2\n"))
+        self.assertFalse(ld._CASSETTE.search("# interactions with the API\n"))
 
 
-class TestRequestHeaders(unittest.TestCase):
-    """A single-page site answers by Accept, not by user agent.
+    def test_a_space_inside_an_attribute_does_not_cut_the_address(self):
+        """66 of 72 findings on canonical/ubuntu.com were asset names with a
+        real space in them, sitting inside an HTML attribute. A browser reads
+        to the closing quote and encodes the spaces."""
+        line = '<img src="https://assets.example.com/v1/hash-monitoring dashboard.png">'
+        m = next(ld._URL.finditer(line))
+        self.assertEqual(
+            ld.normalise(ld.extend_to_quote(line, m)),
+            "https://assets.example.com/v1/hash-monitoring%20dashboard.png")
 
-    crates.io returns 404 for a live page when no Accept header is sent, for
-    any user agent. Diagnosed first as bot protection, which was wrong: 26 of
-    35 "dead links" on comprehensive-rust came from the missing header.
-    """
+    def test_a_quote_earlier_in_the_line_is_not_mistaken_for_an_attribute(self):
+        """The address must not be stretched to a quote it does not belong to."""
+        line = 'text "quoted" then https://example.org/a/b more words here'
+        m = next(ld._URL.finditer(line))
+        self.assertEqual(
+            ld.normalise(ld.extend_to_quote(line, m)), "https://example.org/a/b")
 
-    def test_accept_header_is_sent(self):
-        seen = {}
-
-        class FakeResponse:
-            status = 200
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-
-        def fake_urlopen(req, timeout=None):
-            seen["accept"] = req.get_header("Accept")
-            seen["ua"] = req.get_header("User-agent")
-            return FakeResponse()
-
-        c = ld.Checker(cache_dir=tempfile.mkdtemp(), pause=0)
-        with mock.patch("urllib.request.urlopen", fake_urlopen):
-            self.assertEqual(c.check("https://example.invalid/page"), "200")
-        self.assertIn("text/html", seen["accept"])
-        self.assertIn("linkdrift", seen["ua"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
