@@ -52,7 +52,7 @@ Twelve detectors. Each one is a species of defect we hit on a live project. None
 |---|---|
 | `docdrift` | numpydoc `Parameters` against the real Python signature |
 | `doxdrift` | Doxygen `\param` and `\tparam` against the real C++ declaration |
-| `swiftdrift` | a Swift `- Parameter` against the declaration under it, where nothing else looks |
+| `swiftdrift` | a Swift `- Parameter` against the declaration under it, without building the package |
 | `ifacedrift` | protobuf against OpenAPI, when a project maintains both by hand |
 | `liftdrift` | a vendored copy against the upstream commit that fixed it |
 | `transdrift` | a translated page against the original it was translated from |

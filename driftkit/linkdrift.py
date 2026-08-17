@@ -53,8 +53,11 @@ import json
 import os
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field as dc_field
@@ -284,6 +287,7 @@ class Checker:
         self.pause = pause
         self.requests = 0
         self.from_cache = 0
+        self._lock = threading.Lock()
         os.makedirs(cache_dir, exist_ok=True)
 
     def _key(self, url: str) -> str:
@@ -292,7 +296,8 @@ class Checker:
     def cached(self, url: str) -> Optional[str]:
         p = self._key(url)
         if os.path.exists(p):
-            self.from_cache += 1
+            with self._lock:
+                self.from_cache += 1
             return common.read_text(p).strip()
         return None
 
@@ -318,12 +323,14 @@ class Checker:
             return got
         if self.offline:
             return "unverified: network disabled"
-        self.requests += 1
+        with self._lock:
+            self.requests += 1
         verdict = self._ask(url, "HEAD")
         # Some servers do not do HEAD and answer 405 or 403 to it
         if verdict in ("405", "403", "501") or verdict.startswith("net:"):
             time.sleep(self.pause)
-            self.requests += 1
+            with self._lock:
+                self.requests += 1
             verdict = self._ask(url, "GET")
         time.sleep(self.pause)
         self._store(url, verdict)
@@ -346,6 +353,43 @@ def classify(verdict: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def _host_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).netloc.lower()
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def _check_all(urls: Sequence[str], checker: "Checker", workers: int = 0) -> Dict[str, str]:
+    """Check addresses host by host.
+
+    The pause between requests exists so we do not hammer one server. That is a
+    per-host concern, so hosts run in parallel and each host stays sequential and
+    paused. On a tree whose links point at many different servers this is the whole
+    difference between minutes and hours.
+    """
+    if not urls:
+        return {}
+    by_host: Dict[str, List[str]] = {}
+    for u in urls:
+        by_host.setdefault(_host_of(u), []).append(u)
+    if len(by_host) == 1 or checker.offline:
+        return {u: checker.check(u) for u in urls}
+
+    n = workers or min(16, len(by_host))
+    out: Dict[str, str] = {}
+    lock = threading.Lock()
+
+    def run(host_urls: List[str]) -> None:
+        local = {u: checker.check(u) for u in host_urls}
+        with lock:
+            out.update(local)
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(run, by_host.values()))
+    return out
+
+
 def analyse(root: str, report: Report, checker: Checker, limit: int = 0) -> None:
     found = collect(root, report)
     urls = [u for u in sorted(found) if worth_checking(u, report)]
@@ -353,9 +397,7 @@ def analyse(root: str, report: Report, checker: Checker, limit: int = 0) -> None
         report.truncated = f"{len(urls)} addresses, first {limit} checked"
         urls = urls[:limit]
 
-    first: Dict[str, str] = {}
-    for u in urls:
-        first[u] = checker.check(u)
+    first: Dict[str, str] = _check_all(urls, checker)
     report.urls_checked = len(urls)
 
     # Second pass over everything that did not answer: the failure may be ours.
@@ -363,7 +405,7 @@ def analyse(root: str, report: Report, checker: Checker, limit: int = 0) -> None
     retry = [u for u, v in first.items() if classify(v) == "unverified" and not v.startswith("unverified:")]
     for u in retry:
         os.path.exists(checker._key(u)) and os.remove(checker._key(u))
-        first[u] = checker.check(u)
+    first.update(_check_all(retry, checker))
 
     for u in urls:
         verdict = first[u]
