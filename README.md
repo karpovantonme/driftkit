@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  <strong>Seventeen tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
+  <strong>Eighteen tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
   Python 3.9+, standard library only, nothing to install.<br>
   <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub>
 </p>
 
 <p align="center">
-  <a href="#tests"><img alt="518 checks" src="https://img.shields.io/badge/checks-518%20green-3fb950?style=flat-square"></a>
+  <a href="#tests"><img alt="590 checks" src="https://img.shields.io/badge/checks-590%20green-3fb950?style=flat-square"></a>
   <a href="FALSE-POSITIVES.md"><img alt="61 false positives worked out" src="https://img.shields.io/badge/false%20positives-66%20worked%20out-f85149?style=flat-square"></a>
-  <a href="#findings-that-became-merged-pull-requests"><img alt="17 merged" src="https://img.shields.io/badge/merged%20upstream-17-1f6feb?style=flat-square"></a>
+  <a href="#findings-that-became-merged-pull-requests"><img alt="50 merged" src="https://img.shields.io/badge/merged%20upstream-50-1f6feb?style=flat-square"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7d8590?style=flat-square"></a>
 </p>
 
@@ -52,6 +52,7 @@ Twelve detectors. Each one is a species of defect we hit on a live project. None
 |---|---|
 | `docdrift` | numpydoc `Parameters` against the real Python signature |
 | `doxdrift` | Doxygen `\param` and `\tparam` against the real C++ declaration |
+| `swiftdrift` | a Swift `- Parameter` against the declaration under it, where nothing else looks |
 | `ifacedrift` | protobuf against OpenAPI, when a project maintains both by hand |
 | `liftdrift` | a vendored copy against the upstream commit that fixed it |
 | `transdrift` | a translated page against the original it was translated from |
@@ -161,7 +162,7 @@ One optional dependency: `ifacedrift` needs `protobuf` to parse `.proto` files (
 
 ```console
 $ cd driftkit && for f in test_*.py; do python3 "$f"; done
-518 checks, 0 failures
+590 checks, 0 failures
 ```
 
 Most of them pin a false positive that used to happen. `test_conformance.py` is the odd one out: it checks the tools against **each other**, and it is the only test that catches a tool drifting away from the shared contract. Run it after any change.
