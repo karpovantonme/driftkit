@@ -352,7 +352,10 @@ def org_rule_texts(owner: str) -> tuple:
         tree = api_json(f"repos/{slug}/git/trees/HEAD?recursive=1")
         if not isinstance(tree, dict) or "_error" in tree:
             err = (tree or {}).get("_error", "no answer")
-            if not err.startswith("http 404"):
+            # 404 is "no such repository", 409 is "the repository exists and is
+            # empty". Neither is trouble; both mean there is nothing to read.
+            # Five owners of the twenty Google ones answer 409 for `.github`.
+            if not err.startswith(("http 404", "http 409")):
                 problems.append(f"{slug}: {err}")
             continue
         read.append(slug + (" (tree truncated)" if tree.get("truncated") else ""))
