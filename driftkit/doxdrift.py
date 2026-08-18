@@ -940,17 +940,260 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
     print(stamp.line(__file__, ["common.py"]))
 
 
+
+# ----------------------------------------------------------------------
+# Движок decl: сравнивает объявление с его же определением.
+# Возвращён из вольтовой линии 18.08.2026 при сведении двух копий.
+# ----------------------------------------------------------------------
+
+CALLABLE = re.compile(r'(?<![\w:])([A-Za-z_]\w*)\s*\(')
+QUALIFIER = re.compile(r'^(__)?restrict(__)?$|_restrict$')
+BLOCK_COMMENT = re.compile(r'/\*.*?\*/|//[^\n]*', re.S)
+STRING_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"' r"|'(?:\\.|[^'\\])*'")
+
+
+def _arg_names(inner: str) -> list:
+    """Argument names with `None` where the argument carries no name."""
+    parts, depth, cur = [], 0, ''
+    for ch in inner:
+        if ch in '<([{':
+            depth += 1
+        elif ch in '>)]}':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            parts.append(cur)
+            cur = ''
+        else:
+            cur += ch
+    parts.append(cur)
+
+    names = []
+    for part in parts:
+        part = part.split('=')[0].strip()
+        if not part or part in ('void', '...'):
+            continue
+        m2 = re.search(r'\(\s*[&*]\s*([A-Za-z_]\w*)\s*\)', part)
+        if m2:                      # function pointer: void (*cb)(int)
+            names.append(m2.group(1))
+            continue
+        bare = re.sub(r'\[[^\]]*\]', '', part)
+        # an attribute macro sits after the name and would be taken for it:
+        # `gpointer data G_GNUC_UNUSED`, `hb_font_t *font HB_UNUSED`. On glib
+        # alone this produced 288 findings, every one of them G_GNUC_UNUSED.
+        bare = re.sub(r'(\s[A-Z][A-Z0-9_]{2,})+\s*$', '', bare)
+        words = re.findall(r'[A-Za-z_]\w*', bare)
+        if not words:
+            names.append(None)
+            continue
+        taken = words[-1]
+        names.append(None if _looks_unnamed(bare, taken) else taken)
+    return names
+
+def _blank_comments(src: str) -> str:
+    """Comments and literals are replaced by spaces of the same length so that
+    line numbers stay correct."""
+    def blank(m):
+        return ''.join(' ' if ch != '\n' else '\n' for ch in m.group(0))
+    return STRING_LITERAL.sub(blank, BLOCK_COMMENT.sub(blank, src))
+
+def _callables_in(src: str):
+    """(name, argument names, 'declaration' | 'definition', position)."""
+    src = _blank_comments(src)
+    for m in CALLABLE.finditer(src):
+        name = m.group(1)
+        if name in TYPE_WORDS or name in ('if', 'for', 'while', 'switch',
+                                          'return', 'sizeof', 'defined'):
+            continue
+        open_paren = m.end() - 1
+        close = _match_paren(src, open_paren)
+        if close < 0:
+            continue
+        tail = src[close + 1: close + 200].lstrip()
+        # a macro-shaped name is a macro, not a function
+        if re.fullmatch(r'[A-Z][A-Z0-9_]*', name):
+            continue
+        if tail.startswith(';'):
+            kind = 'declaration'
+        elif tail.startswith('{'):
+            kind = 'definition'
+        else:
+            continue                # a call, an attribute, anything else
+        inner = src[open_paren + 1: close]
+        # A call also ends in a semicolon: `line_iter_next_cluster (it, gap);`
+        # looked exactly like a prototype and paired with the real definition,
+        # 59 findings on pango alone. Two things tell them apart: a declaration
+        # is preceded by a return type inside its own statement, and its
+        # arguments carry types rather than bare variable names.
+        if kind == 'declaration' and not _looks_declared(src, m.start(), inner):
+            COUNTS["decl_calls"] += 1
+            continue
+        args = _arg_names(inner)
+        if not args:
+            continue
+        yield name, args, kind, m.start()
+
+def _looks_declared(src: str, name_at: int, inner: str) -> bool:
+    head = src[:name_at]
+    cut = max(head.rfind(';'), head.rfind('{'), head.rfind('}'), head.rfind(')'))
+    prefix = head[cut + 1:]
+    if not re.search(r'[A-Za-z_]\w*', prefix):
+        return False                # nothing before the name: a bare call
+    if re.search(r'(=|\breturn\b|,|\|\||&&|\?|:)\s*$', prefix):
+        return False                # the name stands in an expression
+    # At least one argument has to carry a type. An access operator rules that
+    # out: `categories[i].opt` and `async->thrdd.res_A` have several words each
+    # and passed the earlier version of this test, so three calls in curl came
+    # out as prototypes.
+    for a in inner.split(','):
+        a = a.strip()
+        if not a or a == 'void':
+            continue
+        if any(op in a for op in ('.', '->', '[', '(')):
+            continue
+        if len(re.findall(r'[A-Za-z_]\w*', a)) > 1 or '*' in a or '&' in a:
+            return True
+    return False
+
+def _looks_unnamed(argument: str, taken: str) -> bool:
+    """True when `taken` is really the tail of a type, not an argument name.
+
+    `const char *` yields `char`, `struct stat *` yields `stat`, `GFile *`
+    yields `GFile`. All three are unnamed arguments and must not be compared.
+
+    A whole family of projects declares functions with types only and no names
+    at all. ImageMagick writes `GetPixelCacheColorspace(const Cache)` and
+    `FormatMagickCaption(Image *,DrawInfo *,const MagickBooleanType,...)`, so
+    the counting has to ignore qualifiers: `const Cache` is two words but one
+    of them is `const`, and what is left is a bare type. Forty-seven findings
+    on ImageMagick, `declares Cache` and `declares MagickBooleanType` among
+    them, all of this nature.
+    """
+    if taken in BASE_TYPES or taken.endswith("_t") or QUALIFIER.search(taken):
+        return True
+    # Qualifiers belong to neither the type nor the name and are dropped first.
+    # What is left is one word for a bare type and two for a type plus a name:
+    #   const Cache              -> [Cache]           unnamed
+    #   const uint8_t *buf       -> [uint8_t, buf]    named
+    #   NexusInfo *magick_restrict -> [NexusInfo]     unnamed
+    words = [w for w in re.findall(r'[A-Za-z_]\w*', argument)
+             if w not in QUALIFIERS and not QUALIFIER.search(w)]
+    if len(words) <= 1:
+        return True
+    # the name never carries the pointer or reference: in `GFile *file` the
+    # last token follows a star, in `GFile *` it does not
+    after = argument[argument.rfind(taken) + len(taken):]
+    if after.strip() not in ("", "[]"):
+        return True
+    return False
+
+def collect_callables(root: str, counts: dict) -> tuple:
+    """Declarations and definitions of every function in the tree."""
+    declared, defined = {}, {}
+    base = pathlib.Path(root)
+    for path in sorted(base.rglob('*')):
+        # C only. In C++ the same shapes mean other things: a templated call
+        # reads as a prototype, a member of a class collides with a free
+        # function of the same name, and `declares this` or `declares nullptr`
+        # comes out the far end. Measured on harfbuzz: 62 findings, nearly all
+        # of that nature. C++ needs the compiler, not a regular expression.
+        if path.suffix not in ('.h', '.c'):
+            continue
+        parts = path.relative_to(base).parts
+        if any(x in SKIP_DIRS or (x.startswith(".") and x not in common.KEEP_HIDDEN)
+               for x in parts):
+            continue
+        try:
+            src = path.read_text(encoding='utf-8', errors='ignore')
+        except OSError:
+            continue
+        # A generated file is not ours to edit: the fix belongs in the grammar
+        # it came from. jq keeps `src/lexer.c` next to `src/lexer.l`, and three
+        # findings sat in the generated one.
+        head = src[:400]
+        if '#line' in head or 'generated by' in head.lower() or 'DO NOT EDIT' in head:
+            counts["decl_generated"] += 1
+            continue
+        # A C++ header declares functions that live in another world: the C++
+        # `CloneString(std::string&)` of Magick++ paired with the C
+        # `CloneString(char **)` of MagickCore purely by name.
+        if re.search(r'^\s*(class|namespace)\s+\w', src, re.M):
+            counts["decl_cpp"] += 1
+            continue
+        counts["decl_files"] += 1
+        rel = str(path.relative_to(base))
+        for name, args, kind, pos in _callables_in(src):
+            store = defined if kind == 'definition' else declared
+            store.setdefault((name, len(args)), []).append(
+                dict(file=rel, line=line_of(src, pos), args=args))
+    return declared, defined
+
+def scan_decl(root: str) -> List[dict]:
+    COUNTS.update(decl_files=0, decl_pairs=0, decl_ambiguous=0, decl_unnamed=0,
+                  decl_calls=0, decl_generated=0, decl_cpp=0)
+    declared, defined = collect_callables(root, COUNTS)
+    hits: List[dict] = []
+    for key, definitions in defined.items():
+        declarations = declared.get(key)
+        if not declarations:
+            continue
+        # overloads and same-arity twins cannot be paired by name alone
+        if len(declarations) > 1 or len(definitions) > 1:
+            COUNTS["decl_ambiguous"] += 1
+            continue
+        head, body = declarations[0], definitions[0]
+        COUNTS["decl_pairs"] += 1
+        for i, (a, b) in enumerate(zip(head["args"], body["args"])):
+            if a is None or b is None:
+                COUNTS["decl_unnamed"] += 1
+                continue
+            if a != b:
+                hits.append(dict(
+                    kind='decl', hard=True, file=head["file"], line=head["line"],
+                    name=a, sig=[b], where=key[0], position=i + 1,
+                    decl=f'{head["file"]}:{head["line"]} declares {a}, '
+                         f'{body["file"]}:{body["line"]} defines {b}'))
+    return hits
+
+def print_decl_report(hits: List[dict], root: str, verbose: bool = False) -> None:
+    if hits:
+        print(f"\n=== An argument named one way in the header and another in the "
+              f"source ({len(hits)}) ===")
+        for h in hits[: (len(hits) if verbose else 40)]:
+            print(f"\n  {h['where']}(), argument {h['position']}")
+            print(f"    {h['decl']}")
+        if not verbose and len(hits) > 40:
+            print(f"\n  ... {len(hits) - 40} more, use -v for all")
+
+    print("\n=== Coverage ===")
+    print(f"  tree:                   {root}")
+    print(f"  engine:                 decl")
+    print(f"  files read:             {COUNTS['decl_files']}")
+    print(f"  declaration/definition pairs: {COUNTS['decl_pairs']}")
+    print(f"  ambiguous, skipped:     {COUNTS['decl_ambiguous']} (overloads: one name, several arities)")
+    print(f"  arguments with no name: {COUNTS['decl_unnamed']} (a header may omit them)")
+    print(f"  calls read as prototypes:{COUNTS['decl_calls']} (dismissed: no return type before the name)")
+    print(f"  generated files skipped:{COUNTS['decl_generated']} (fix belongs in the grammar)")
+    print(f"  C++ files skipped:      {COUNTS['decl_cpp']} (another world, same names)")
+    print(common.findings_line(len(hits), 0))
+    print(stamp.line(__file__, ["common.py"]))
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Doxygen \\param against the C++ signature")
     ap.add_argument("root", help="directory holding the headers")
-    ap.add_argument("--engine", choices=("regex", "clang"), default="regex",
-                    help="regex reads the text, clang asks the compiler")
+    ap.add_argument("--engine", choices=("regex", "clang", "decl"), default="regex",
+                    help="regex reads the text, clang asks the compiler, "
+                         "decl compares a declaration with its own definition")
     common.add_common_args(ap)
     args = ap.parse_args(argv)
 
     if args.engine == "clang" and not clang_available():
         sys.exit("clang++ not found: install it or use --engine regex")
-    hits = scan_clang(args.root) if args.engine == "clang" else scan(args.root)
+    if args.engine == "clang":
+        hits = scan_clang(args.root)
+    elif args.engine == "decl":
+        hits = scan_decl(args.root)
+    else:
+        hits = scan(args.root)
     print_report(hits, args.root, args.verbose, args.engine)
 
     if args.json:
