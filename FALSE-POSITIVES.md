@@ -4,8 +4,8 @@
 
 ## Why this file exists
 
-The kit, eleven detectors and five pipeline stages, was not written out of lucky
-guesses. It was written out of **reading the places where it lied**. A hundred and twenty
+The kit, 19 detectors and 5 pipeline stages, was not written out of lucky
+guesses. It was written out of **reading the places where it lied**. 117
 worked cases so far, and not one of them came from imagination: every one turned
 up on a live project, was read by hand, and only then became a rule and a test.
 

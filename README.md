@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  <strong>Eighteen tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
+  <strong>19 tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
   Python 3.9+, standard library only, nothing to install.<br>
   <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub>
 </p>
 
 <p align="center">
   <a href="#tests"><img alt="590 checks" src="https://img.shields.io/badge/checks-590%20green-3fb950?style=flat-square"></a>
-  <a href="FALSE-POSITIVES.md"><img alt="61 false positives worked out" src="https://img.shields.io/badge/false%20positives-66%20worked%20out-f85149?style=flat-square"></a>
-  <a href="#findings-that-became-merged-pull-requests"><img alt="50 merged" src="https://img.shields.io/badge/merged%20upstream-50-1f6feb?style=flat-square"></a>
+  <a href="FALSE-POSITIVES.md"><img alt="117 false positives worked out" src="https://img.shields.io/badge/false%20positives-117%20worked%20out-f85149?style=flat-square"></a>
+  <a href="#findings-that-became-merged-pull-requests"><img alt="58 landed" src="https://img.shields.io/badge/landed%20upstream-58-1f6feb?style=flat-square"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7d8590?style=flat-square"></a>
 </p>
 
@@ -42,11 +42,11 @@ $ python3 driftkit/docdrift.py ~/src/statsmodels
   run:                    docdrift.py fingerprint 17f92143
 ```
 
-A real run, not an illustration. Eleven of those sixteen sit in `archive/`, which is why every report prints **where it looked** rather than a verdict.
+A real run, not an illustration. 11 of those 16 sit in `archive/`, which is why every report prints **where it looked** rather than a verdict.
 
 ## The tools
 
-Twelve detectors. Each one is a species of defect we hit on a live project. None of them is a category invented at a desk.
+14 detectors. Each one is a species of defect we hit on a live project. None of them is a category invented at a desk.
 
 | Tool | What it compares |
 |---|---|
@@ -63,8 +63,9 @@ Twelve detectors. Each one is a species of defect we hit on a live project. None
 | `assertdrift` | a helm-unittest assertion that never compares its message |
 | `linkdrift` | external links that no longer answer |
 | `racedrift` | a promise about concurrency against the suite run under the race detector |
+| `syncdrift` | a hand-written "keep this in sync with X" against the file X, which may no longer be there |
 
-Five pipeline stages around them.
+5 pipeline stages around them.
 
 | Stage | What it does |
 |---|---|
@@ -110,7 +111,7 @@ A tool like this is worth exactly the list of mistakes already worked out of it,
 | A function pointer read as a one-argument function | **111 of 133** on opencv | The name is in the first pair of parentheses, the arguments in the second |
 | A `# numpydoc ignore=PR02` the author wrote on purpose | 1 on statsmodels | The directive names the very check we are running |
 
-Eighty-eight worked cases, twelve species of mistake, and the table of what the kit is **not** immunised against yet: **[FALSE-POSITIVES.md](FALSE-POSITIVES.md)**.
+117 worked cases, 13 species of mistake, and the table of what the kit is **not** immunised against yet: **[FALSE-POSITIVES.md](FALSE-POSITIVES.md)**.
 
 Two of those entries are worth singling out, because they are the dangerous kind: a self-refutation step that quietly killed real findings, and a directory mask that dropped `.github` and so reduced coverage without saying so. Both made the report look *cleaner*. That is why every run ends with a coverage block: `findings: 0 hard` next to `files read: 0` means "nothing to compare", not "clean".
 
@@ -139,11 +140,11 @@ Not examples written for a README.
 | [toqito](https://github.com/vprusso/toqito/pull/1910) | a test named for one property, catching another | 9 h |
 | [sniffnet](https://github.com/GyulyVGC/sniffnet/pull/1266) | notifications posting JSON without `Content-Type` | 17 h |
 
-Fifty-eight sent, seventeen merged, median time to merge fifteen hours.
+105 sent, 54 merged and 4 more landed the project's own way, median time to merge 36 hours. Live count in [the search](https://github.com/search?q=is%3Apr+author%3Akarpovantonme+is%3Amerged+-org%3Amediatiger&type=pullrequests).
 
 ## If you are running this with an agent
 
-The kit plus an agent can open twenty pull requests in an afternoon, and twenty pull requests in an afternoon is what gets all of them closed unread. That happened to us: two people ran the same checker against the same project a day apart, both patches were correct, and the maintainer closed both.
+The kit plus an agent can open 20 pull requests in an afternoon, and 20 pull requests in an afternoon is what gets all of them closed unread. That happened to us: two people ran the same checker against the same project a day apart, both patches were correct, and the maintainer closed both.
 
 Read **[USING-THIS-WITH-AN-AGENT.md](USING-THIS-WITH-AN-AGENT.md)** first. Short version: say a tool found it, read the project's own rules before writing anything, never send a finding you have not opened in an editor, and check **[TERRITORY.md](TERRITORY.md)** so you do not land where someone already is. Add yourself there while you are at it.
 
