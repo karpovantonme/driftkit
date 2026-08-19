@@ -24,8 +24,10 @@ confirmation rate. There is no such measurement: findings from this check
 have so far been read one by one.
 
 KNOWN BLIND SPOTS:
-  - **numpydoc only.** Google style (`Args:`) is not parsed at all: indentation
-    carries less meaning there and the parse gets noisy;
+  - both numpydoc and Google style (`Args:`) are read. Google style was added
+    on 19.08.2026 after a run on PySceneDetect reported the project checked
+    while looking at 0 of its arguments. reStructuredText fields (`:param x:`)
+    are still not parsed;
   - functions with `*args`/`**kwargs` are skipped for class A, since anything
     may legitimately be documented for them;
   - defaults computed by an expression rather than written as a literal are
@@ -218,6 +220,96 @@ def doc_params(doc):
         else:
             i += 1
     return out
+
+
+
+# ---------------------------------------------------------------------------
+# Google style.
+#
+# Added 19.08.2026 after a live run on Breakthrough/PySceneDetect: 51 files
+# read, `functions with Parameters: 0`, and 0 findings. The tool reported the
+# project as checked and had not looked at a single argument, because the
+# whole repository writes `Args:` rather than `Parameters` with an underline.
+# A throwaway 70-line parser found 3 real mismatches in it.
+#
+# 🔴 The colon means different things in the two dialects, and reusing PARAMLINE
+# here would be silently wrong:
+#
+#     numpydoc:   name : type          <- after the colon is the TYPE
+#     google:     name: description    <- after the colon is the DESCRIPTION
+#                 name (type): description
+#
+# Feeding a description into the type string would make DEFAULT_IN_TYPE read
+# "Defaults to 5" out of prose that is not a type, so the type here is taken
+# only from the parentheses, and the description is passed along separately so
+# a documented default is still found where Google style actually writes it.
+GOOGLE_SEC = re.compile(
+    r'^\s*(Args|Arguments|Keyword Args|Keyword Arguments|Parameters)\s*:\s*$', re.I)
+GOOGLE_ANYSEC = re.compile(
+    r'^\s*(Returns?|Yields?|Raises|Note|Notes|Example|Examples|Attributes|'
+    r'Todo|Warns|Warning|Warnings|References|See Also|Other Parameters)\s*:\s*$', re.I)
+# `name (type, optional): text` and `*args: text` and bare `name: text`.
+GOOGLE_PARAM = re.compile(
+    r'^(?P<ind>\s*)(?P<name>\*{0,2}\w+)\s*(?:\((?P<type>[^)]*)\))?\s*:\s*(?P<desc>.*)$')
+
+
+def doc_params_google(doc):
+    """-> [(names, type string, line number)], the same shape as doc_params.
+
+    A parameter line sits at one indent and its continuation lines sit deeper,
+    which is the only reliable way to tell `name: description` from a wrapped
+    sentence that happens to contain a colon. The base indent comes from the
+    first parameter under the heading and is then fixed, for the same reason it
+    is fixed in the numpydoc parser: letting a later line reset it is how a
+    wrapped URL becomes an argument called `https`.
+    """
+    lines = cut_at_examples(doc.split('\n'))
+    out, i = [], 0
+    while i < len(lines):
+        if not GOOGLE_SEC.match(lines[i]):
+            i += 1
+            continue
+        head_ind = len(lines[i]) - len(lines[i].lstrip())
+        j, base_ind = i + 1, None
+        while j < len(lines):
+            ln = lines[j]
+            if not ln.strip():
+                j += 1
+                continue
+            ind = len(ln) - len(ln.lstrip())
+            # Back out to the heading level, or a sibling section: done.
+            if ind <= head_ind or GOOGLE_ANYSEC.match(ln):
+                break
+            m = GOOGLE_PARAM.match(ln)
+            if m:
+                if base_ind is None:
+                    base_ind = ind
+                if ind == base_ind:
+                    name = m.group('name').lstrip('*')
+                    if re.fullmatch(r'\w+', name) and not is_note(name) \
+                            and name not in NOT_A_NAME:
+                        # The type goes in from the parentheses only. The
+                        # description rides along after it so a default written
+                        # as "Defaults to 5." is still visible to the caller,
+                        # and nothing that is merely prose can pass for a type.
+                        typ = (m.group('type') or '').strip()
+                        desc = m.group('desc') or ''
+                        out.append(([name], f"{typ} {desc}".strip(), j))
+            j += 1
+        i = j
+    return out
+
+
+def doc_params_any(doc):
+    """numpydoc first, Google style when it finds nothing.
+
+    Order matters rather than being a preference. A numpydoc docstring can
+    carry `Returns:` with a colon inside a Notes block and would then look
+    faintly like Google style, while the reverse does not happen: Google style
+    never underlines a heading. So the stricter dialect is tried first and the
+    looser one only answers where the strict one saw nothing at all.
+    """
+    return doc_params(doc) or doc_params_google(doc)
 
 
 # Compatibility decorators accept names beyond the ones in the signature.
@@ -441,7 +533,7 @@ def scan_file(path, repo):
         if author_switched_off(lines, fn):
             COUNTS["suppressed"] += 1
             continue
-        dp = doc_params(doc)
+        dp = doc_params_any(doc)
         if not dp:
             continue
         COUNTS["funcs"] += 1

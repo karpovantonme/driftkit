@@ -287,14 +287,80 @@ def f(a):
 ''')
         self.assertEqual([x["param"] for x in h], ["nonexistent"])
 
-    def test_google_style_is_not_parsed(self):
-        """Stated in the header: numpydoc only."""
-        self.assertEqual(findings_in('''
+    def test_google_style_is_read(self):
+        """Was a stated blind spot until 19.08.2026.
+
+        A run on PySceneDetect read 51 files, reported `functions with
+        Parameters: 0` and found nothing, because the whole repository writes
+        `Args:`. The project came back looking clean while nothing had been
+        compared.
+        """
+        h = findings_in('''
 def f(model):
     """Does the thing.
 
     Args:
         MODEL: the model
+    """
+''')
+        self.assertEqual([x["param"] for x in h], ["MODEL"])
+
+    def test_a_google_description_is_not_mistaken_for_a_type(self):
+        """The colon means different things in the two dialects.
+
+        numpydoc puts the type after the colon, Google style puts the
+        description there. Reading a description as a type would let
+        `Defaults to 5` be pulled out of any sentence containing the words.
+        """
+        h = findings_in('''
+def f(count=3):
+    """Does the thing.
+
+    Args:
+        count: how many. Defaults to 5.
+    """
+''')
+        self.assertEqual([(x["kind"], x.get("param")) for x in h], [("B", "count")])
+
+    def test_a_wrapped_google_description_is_not_a_parameter(self):
+        """A continuation line carrying a colon is the classic false positive.
+
+        Same family as the wrapped URL that once became a parameter called
+        `https` in the numpydoc parser.
+        """
+        self.assertEqual(findings_in('''
+def f(path):
+    """Does the thing.
+
+    Args:
+        path: where to write. See also:
+            https://example.com/docs for the format.
+    """
+'''), [])
+
+    def test_a_google_type_in_parentheses_is_read(self):
+        h = findings_in('''
+def f(name):
+    """Does the thing.
+
+    Args:
+        nmae (str, optional): the name
+    """
+''')
+        self.assertEqual([x["param"] for x in h], ["nmae"])
+
+    def test_a_google_section_stops_at_the_next_one(self):
+        """`Returns:` ends the arguments. Without that the return description
+        parses as one more argument."""
+        self.assertEqual(findings_in('''
+def f(a):
+    """Does the thing.
+
+    Args:
+        a: the first one
+
+    Returns:
+        result: what came out
     """
 '''), [])
 
