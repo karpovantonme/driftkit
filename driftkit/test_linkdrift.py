@@ -306,5 +306,46 @@ class TestReportedByUsers(unittest.TestCase):
             ld.normalise(ld.extend_to_quote(line, m)), "https://example.org/a/b")
 
 
+class TestFoundOnRealRun(unittest.TestCase):
+    """Four defects a live run on 6 projects turned up, 19.08.2026."""
+
+    def test_head_404_is_retried_with_get(self):
+        # app.koofr.net and friends answer 404 to HEAD and 200 to GET. Without
+        # the retry those went into the report as dead, one of them cited 16
+        # times in rclone's manual.
+        asked = []
+
+        class Fake(ld.Checker):
+            def _ask(self, url, method):
+                asked.append(method)
+                return "404" if method == "HEAD" else "200"
+
+        c = Fake(cache_dir=tempfile.mkdtemp(), pause=0)
+        self.assertEqual(c.check("https://example.com/x"), "200")
+        self.assertEqual(asked, ["HEAD", "GET"])
+
+    def test_an_unparsable_address_does_not_kill_the_run(self):
+        # A codespell pattern in pandas/pyproject.toml reached urllib and threw
+        # ValueError before any request, ending a run over 258 files.
+        c = ld.Checker(cache_dir=tempfile.mkdtemp(), pause=0)
+        verdict = c._ask("https://([w/.])+", "HEAD")
+        self.assertTrue(verdict.startswith("unparsable:"), verdict)
+
+    def test_a_quote_hiding_under_a_bracket_is_trimmed(self):
+        # `.../latest&quot;)` decodes to `.../latest")`. One pass strips the
+        # bracket and never revisits the quote, and a live endpoint is reported
+        # dead.
+        self.assertEqual(
+            ld.normalise("https://api.github.com/repos/x/y/releases/latest&quot;)"),
+            "https://api.github.com/repos/x/y/releases/latest",
+        )
+
+    def test_a_shell_that_404s_at_a_router_is_not_called_dead(self):
+        # crates.io returns its Ember shell with status 404 and draws the page
+        # in the browser. 27 of 32 findings on comprehensive-rust were this.
+        self.assertEqual(ld.classify("404", "https://crates.io/crates/serde"), "unverified")
+        self.assertEqual(ld.classify("404", "https://example.com/gone"), "dead")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

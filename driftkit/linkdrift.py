@@ -134,7 +134,7 @@ _PLACEHOLDER_HOST = re.compile(
 _IDENTIFIER_URI = re.compile(
     r"^https?://(?:schemas\.xmlsoap\.org|schemas\.microsoft\.com|www\.w3\.org/\d{4}/|"
     r"purl\.org|xmlns\.com|docs\.oasis-open\.org/wss/|json-schema\.org/draft|"
-    r"schema\.org/?$|ns\.adobe\.com|iptc\.org/std/)", re.I
+    r"schema\.org/?$|ns\.adobe\.com|iptc\.org/std/|ogp\.me/ns)", re.I
 )
 
 UA = "Mozilla/5.0 (compatible; linkdrift/1.0; +https://github.com/)"
@@ -249,9 +249,17 @@ def normalise(raw: str) -> Optional[str]:
     """
     url = _TAIL_ENTITY.sub("", raw)
     url = html.unescape(url)
-    url = url.rstrip(".,;:'\"")
-    while url.endswith(")") and url.count("(") < url.count(")"):
-        url = url[:-1]
+    # Trimming runs in a loop because the two kinds of rubbish hide behind each
+    # other. `.../latest&quot;)` decodes to `.../latest")`: the bracket is
+    # stripped first, and a single pass then never revisits the quote it was
+    # covering. That turned a live GitHub endpoint into a dead one on rclone.
+    while True:
+        before = url
+        url = url.rstrip(".,;:'\"")
+        while url.endswith(")") and url.count("(") < url.count(")"):
+            url = url[:-1]
+        if url == before:
+            break
     if url.count("(") != url.count(")") or url.count("[") != url.count("]"):
         return None
     return url or None
@@ -306,7 +314,16 @@ class Checker:
             fh.write(verdict)
 
     def _ask(self, url: str, method: str) -> str:
-        req = urllib.request.Request(url, method=method, headers={"User-Agent": UA})
+        # Building the Request can throw before any network happens. A codespell
+        # pattern in pandas/pyproject.toml (`'https://([\w/\.])+'`) survived the
+        # capture, and urllib raised ValueError: Invalid IPv6 URL on the stray
+        # bracket. That killed the whole run over 258 documentation files, and
+        # nothing in the report said why. One bad address is a finding about
+        # that address, never about the other thousand.
+        try:
+            req = urllib.request.Request(url, method=method, headers={"User-Agent": UA})
+        except Exception as e:  # noqa: BLE001
+            return f"unparsable:{type(e).__name__}"
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return str(resp.status)
@@ -326,8 +343,15 @@ class Checker:
         with self._lock:
             self.requests += 1
         verdict = self._ask(url, "HEAD")
-        # Some servers do not do HEAD and answer 405 or 403 to it
-        if verdict in ("405", "403", "501") or verdict.startswith("net:"):
+        # Some servers do not do HEAD and answer 405 or 403 to it.
+        #
+        # 404 belongs in this list too, and its absence was the most expensive
+        # mistake this file has made. Measured 19.08.2026 on a real run:
+        # app.koofr.net, app.box.com/developers/console, azure.microsoft.com
+        # and askubuntu.com/search all answer 404 to HEAD and 200 to GET. In
+        # rclone alone that was 5 of 26 "dead" links, one of them cited 16
+        # times. A report like that gets you closed, and rightly.
+        if verdict in ("404", "405", "403", "501") or verdict.startswith("net:"):
             time.sleep(self.pause)
             with self._lock:
                 self.requests += 1
@@ -337,7 +361,22 @@ class Checker:
         return verdict
 
 
-def classify(verdict: str) -> str:
+# Sites that answer 404 to a program and 200 to a browser. Measured 19.08.2026.
+#
+# crates.io is an Ember app: it returns its shell with status 404 and lets the
+# client-side router draw the page, so `serde` and `log` both look dead. GitHub
+# blocks /stargazers for everyone, checked against facebook/react and
+# torvalds/linux. 27 of 32 findings on google/comprehensive-rust were this and
+# nothing else.
+#
+# These are reported apart from dead links rather than dropped: the address may
+# still be wrong, and hiding it would be the other kind of lie.
+_SPA_404 = re.compile(r"^https?://(?:crates\.io/|github\.com/[^/]+/[^/]+/stargazers)", re.I)
+
+
+def classify(verdict: str, url: str = "") -> str:
+    if url and _SPA_404.match(url) and verdict == "404":
+        return "unverified"
     if verdict.isdigit():
         code = int(verdict)
         if code in DEAD:
@@ -402,14 +441,14 @@ def analyse(root: str, report: Report, checker: Checker, limit: int = 0) -> None
 
     # Second pass over everything that did not answer: the failure may be ours.
     # Without it the raw result on kotlin-web-site was 123 instead of 47.
-    retry = [u for u, v in first.items() if classify(v) == "unverified" and not v.startswith("unverified:")]
+    retry = [u for u, v in first.items() if classify(v, u) == "unverified" and not v.startswith("unverified:")]
     for u in retry:
         os.path.exists(checker._key(u)) and os.remove(checker._key(u))
     first.update(_check_all(retry, checker))
 
     for u in urls:
         verdict = first[u]
-        kind = classify(verdict)
+        kind = classify(verdict, u)
         refs = found[u]
         if kind == "alive":
             report.alive += 1
