@@ -1120,5 +1120,85 @@ class TestAdapterToTheReferenceParser(unittest.TestCase):
         self.assertEqual(docdrift.split_names("random_state"), ["random_state"])
 
 
+
+class TestFoundOnTheGoogleStyleSweep(unittest.TestCase):
+    """Five defects a run over keras, flax and adk-python turned up, 20.08.2026.
+
+    106 findings came back and 57 of them were ours. Forty were the first test
+    below, one mistake, and it was hiding behind a full stop.
+    """
+
+    def test_a_backtick_behind_a_full_stop_is_stripped(self):
+        """40 of 57 false positives in one run.
+
+        "Defaults to `-1`." leaves the closing backtick under the stop. Strip
+        quotes first and the backtick survives; strip the stop afterwards and
+        nothing revisits it. Same shape as the quote hiding under a bracket in
+        linkdrift.
+        """
+        self.assertEqual(docdrift.norm("`-1`."), "-1")
+        self.assertEqual(docdrift.norm("``False``."), "False")
+        self.assertEqual(docdrift.norm('"5".'), "5")
+
+    def test_default_to_without_the_s_reads_the_value(self):
+        """keras/src/ops/nn.py writes "Default to `-1`."
+
+        The generic branch matched `default` plus a separator and read the
+        value as `to`.
+        """
+        h = findings_in('''
+def f(axis=-1):
+    """Does the thing.
+
+    Args:
+        axis: which one. Default to `1`.
+    """
+''')
+        self.assertEqual([(x["kind"], x.get("param")) for x in h], [("B", "axis")])
+
+    def test_a_docstring_inside_a_fence_is_not_read(self):
+        """adk-python shows a prompt template in triple backticks, and the
+        template carries a whole docstring of its own with its own Args."""
+        self.assertEqual(findings_in('''
+def f(prompt):
+    """Does the thing.
+
+    Args:
+        prompt: the template to use, shaped like this:
+
+            ```
+            def tool(timezone, location):
+                """Gets the time.
+
+                Args:
+                    timezone: the zone
+                    location: the place
+                """
+            ```
+    """
+'''), [])
+
+    def test_a_summary_line_saying_args_does_not_become_a_parameter(self):
+        """A summary line that is itself the word Args with a colon.
+
+        `application_integration_toolset.py` opens that way and carries the
+        real section below it. The nested heading parsed as an argument
+        literally named Args.
+        """
+        h = findings_in('''
+def f(name):
+    """Args:
+
+    Args:
+        name: the name
+    """
+''')
+        self.assertEqual(h, [])
+
+    def test_a_samples_directory_is_skipped(self):
+        """adk-python keeps demo agents in contributing/samples, where a line
+        like `Example: { "location_name": "Basel" }` sits at parameter indent."""
+        self.assertIn("samples", docdrift.SKIP_DIRS)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

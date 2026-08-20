@@ -64,7 +64,11 @@ import stamp  # noqa: E402
 # tests, examples and docs are written to illustrate, not to describe an API.
 SKIP_DIRS = common.SKIP_DIRS | {
     "test", "tests", "testing", "_test", "doc", "docs", "examples", "benchmarks",
-    ".tox",
+    # `samples` sits next to `examples` for the same reason: adk-python keeps
+    # its demo agents in contributing/samples, and a line like
+    # `Example: { "location_name": "Basel" }` at parameter indent reads as an
+    # argument there.
+    "samples", ".tox",
 }
 
 # A trailing colon after the heading is allowed. pyGSTi writes `Returns:` above
@@ -93,8 +97,12 @@ PARAMLINE = re.compile(
 # every fractional default became a mismatch. The value now ends at a sentence
 # boundary (". ") or at a comma, not at the first dot. Same family of mistake
 # as a flag name truncated mid-word.
+# `defaults? to` comes first on purpose. Written the other way round, the
+# generic `default[\s:=]+` branch matches "Default to `-1`" as the word
+# `default` plus a separator, and the value read out is `to`. Seen in
+# keras/src/ops/nn.py.
 DEFAULT_IN_TYPE = re.compile(
-    r'(?:default[\s:=]+|defaults to\s+)(?P<val>[^,;)\]]+?)(?=\.\s|[,;)\]]|$)', re.I)
+    r'(?:defaults?\s+to\s+|default[\s:=]+)(?P<val>[^,;)\]]+?)(?=\.\s|[,;)\]]|$)', re.I)
 EXAMPLES = re.compile(r'^\s*Examples?\s*:?\s*$', re.I)
 # Notes inside a Parameters section parse as arguments: the line
 # `TODO: looks like not used yet` is shaped exactly like `name : type`.
@@ -253,6 +261,25 @@ GOOGLE_PARAM = re.compile(
     r'^(?P<ind>\s*)(?P<name>\*{0,2}\w+)\s*(?:\((?P<type>[^)]*)\))?\s*:\s*(?P<desc>.*)$')
 
 
+def strip_fences(lines):
+    """Drop fenced blocks. What is inside them is an example, not this docstring.
+
+    adk-python shows a prompt template inside triple backticks, and that
+    template contains a whole docstring of its own with its own `Args:`. Its
+    parameters came out as findings about the enclosing function: timezone,
+    location, time. `cut_at_examples` does not help, because a fence needs no
+    `Examples:` heading above it.
+    """
+    out, inside = [], False
+    for ln in lines:
+        if ln.lstrip().startswith("```"):
+            inside = not inside
+            out.append("")
+            continue
+        out.append("" if inside else ln)
+    return out
+
+
 def doc_params_google(doc):
     """-> [(names, type string, line number)], the same shape as doc_params.
 
@@ -263,7 +290,7 @@ def doc_params_google(doc):
     is fixed in the numpydoc parser: letting a later line reset it is how a
     wrapped URL becomes an argument called `https`.
     """
-    lines = cut_at_examples(doc.split('\n'))
+    lines = strip_fences(cut_at_examples(doc.split('\n')))
     out, i = [], 0
     while i < len(lines):
         if not GOOGLE_SEC.match(lines[i]):
@@ -280,6 +307,16 @@ def doc_params_google(doc):
             # Back out to the heading level, or a sibling section: done.
             if ind <= head_ind or GOOGLE_ANYSEC.match(ln):
                 break
+            # A second heading inside the section restarts it rather than
+            # counting as a parameter. `application_integration_toolset.py`
+            # opens with `"""Args:` as its summary line and carries the real
+            # `Args:` below, and the nested heading parsed as an argument
+            # literally named Args.
+            if GOOGLE_SEC.match(ln):
+                base_ind = None
+                head_ind = ind
+                j += 1
+                continue
             m = GOOGLE_PARAM.match(ln)
             if m:
                 if base_ind is None:
@@ -294,6 +331,22 @@ def doc_params_google(doc):
                         # and nothing that is merely prose can pass for a type.
                         typ = (m.group('type') or '').strip()
                         desc = m.group('desc') or ''
+                        # Continuation lines join the description. Google style
+                        # wraps freely, and keras writes "Default to" at the end
+                        # of one line with the value on the next. Reading a
+                        # single line then found the words and no value, and the
+                        # default came out as the word `to`.
+                        k = j + 1
+                        while k < len(lines):
+                            nxt = lines[k]
+                            if not nxt.strip():
+                                k += 1
+                                continue
+                            nxt_ind = len(nxt) - len(nxt.lstrip())
+                            if nxt_ind <= base_ind or GOOGLE_ANYSEC.match(nxt):
+                                break
+                            desc += ' ' + nxt.strip()
+                            k += 1
                         out.append(([name], f"{typ} {desc}".strip(), j))
             j += 1
         i = j
@@ -488,7 +541,24 @@ def is_prose(val: str) -> bool:
 
 
 def norm(v):
-    s = str(v).strip().strip('`"\'').rstrip('.')
+    """Strip the punctuation a docstring wraps a value in, until it stops changing.
+
+    One pass is not enough and the reason is worth keeping. A docstring writes
+    "Defaults to `-1`." and the two kinds of rubbish hide behind each other:
+    stripping quotes first leaves the trailing backtick under the full stop,
+    and stripping the stop afterwards has nothing left to run. The value came
+    out as `-1` with a backtick still attached and matched no literal at all.
+
+    Measured 20.08.2026 on keras and flax: 40 of 57 false positives in one run
+    were this and nothing else. Same shape as the quote hiding under a bracket
+    in linkdrift, fixed there the day before.
+    """
+    s = str(v).strip()
+    while True:
+        before = s
+        s = s.strip('`"\'').strip().rstrip('.').strip()
+        if s == before:
+            break
     return {'true': 'True', 'false': 'False', 'none': 'None'}.get(s.lower(), s)
 
 
