@@ -1200,5 +1200,53 @@ def f(name):
         like `Example: { "location_name": "Basel" }` sits at parameter indent."""
         self.assertIn("samples", docdrift.SKIP_DIRS)
 
+
+class TestGuardLens(unittest.TestCase):
+    """Severity, added 20.08.2026 after a sweep over 59 repositories.
+
+    The sweep is the reason this is a lens and not a tool: 607 findings, 3 with
+    a guard-shaped name, 2 of them real. Four probes of what docdrift cannot
+    see returned zero security findings between them.
+    """
+
+    def test_a_guard_name_is_marked(self):
+        for name in ("safe_mode", "verify", "check_hostname", "weights_only",
+                     "allow_unsafe", "ssl_verify"):
+            self.assertTrue(docdrift.guards_something(name), name)
+
+    def test_an_ordinary_name_is_not(self):
+        for name in ("model", "num_workers", "axis", "filters", "batch_size"):
+            self.assertFalse(docdrift.guards_something(name), name)
+
+    def test_checkpoint_is_not_a_check(self):
+        """The trap that makes this a split rather than a substring match.
+
+        `check` has to fire on `check_hostname` and stay quiet on `checkpoint`,
+        which is ordinary in this corpus and guards nothing at all.
+        """
+        self.assertTrue(docdrift.guards_something("check_hostname"))
+        self.assertFalse(docdrift.guards_something("checkpoint"))
+        self.assertFalse(docdrift.guards_something("checkpointing"))
+
+    def test_the_keras_line_that_started_this(self):
+        """serialization_lib documented safe_mode as defaulting to False.
+
+        It defaults to True. The sentence says the protection against unsafe
+        lambda deserialization is off, and goes on to explain how to turn it
+        off further.
+        """
+        h = findings_in('''
+def deserialize(config, safe_mode=True):
+    """Does the thing.
+
+    Args:
+        safe_mode: Boolean, defaults to False. If True, disables unsafe
+            lambda deserialization.
+    """
+''')
+        self.assertEqual(len(h), 1)
+        self.assertEqual(h[0]["param"], "safe_mode")
+        self.assertTrue(docdrift.guards_something(h[0]["param"]))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -824,21 +824,75 @@ def is_hard(hit: dict) -> bool:
     return hit.get("kind") == "A"
 
 
+
+# ---------------------------------------------------------------------------
+# Severity, added 20.08.2026.
+#
+# A finding whose parameter guards something costs more when it is wrong. In
+# keras, `deserialize_keras_object` documented `safe_mode` as defaulting to
+# False when it defaults to True: the text says the protection against unsafe
+# lambda deserialization is off, and explains how to turn it off further. A
+# misspelled parameter name costs a reader a minute. That line invites them to
+# disable arbitrary code execution protection they already had.
+#
+# 🔴 This is a lens on findings already made, not a search of its own, and the
+# distinction is the whole point. A sweep over 59 repositories produced 607
+# findings, 3 carried a guard-shaped name and 2 of those were real: 0.49%.
+# Four separate probes of what docdrift structurally cannot see returned zero
+# security findings between them, because the pools barely overlap. Guard flags
+# live where reST and Google style are written; the numpydoc blind spot lives
+# in the scientific stack, which has almost no guard flags.
+#
+# So there is no securedrift to write. There is a word list and a flag, and
+# their value is triage: which of 607 to send first, and in what words.
+#
+# 🔴 What this is not: a vulnerability scanner. It reports that a sentence and
+# a signature disagree about something protective. It says nothing about
+# whether anything is exploitable, and a report built on it must not imply
+# otherwise. Real security findings have their own etiquette, private
+# disclosure and windows, and walking into that without grounds is how you get
+# ignored at best.
+GUARD_WORDS = frozenset({
+    "safe", "safe_mode", "unsafe", "secure", "insecure", "verify", "verified",
+    "verification", "validate", "validation", "strict", "check", "checks",
+    "trust", "trusted", "untrusted", "sanitize", "sanitise", "escape",
+    "allow_unsafe", "check_hostname", "ssl", "tls", "cert", "certificate",
+    "auth", "authenticate", "authorization", "permission", "privilege",
+    "sandbox", "isolation", "signature_check", "weights_only",
+})
+
+
+def guards_something(param: str) -> bool:
+    """True when the parameter name reads as a guard.
+
+    Split on the usual separators rather than matched as a substring: `check`
+    must fire on `check_hostname` and stay quiet on `checkpoint`, which is
+    ordinary in this corpus and guards nothing.
+    """
+    parts = re.split(r"[_\-.]", param.lower())
+    return any(p in GUARD_WORDS for p in parts) or param.lower() in GUARD_WORDS
+
+
 def print_report(hits: List[dict], root: str, verbose: bool = False,
                  engine: str = "rules") -> None:
+    for h in hits:
+        h["guards"] = guards_something(h.get("param", ""))
     hard = [h for h in hits if is_hard(h)]
     soft = [h for h in hits if not is_hard(h)]
+    guarded = [h for h in hits if h["guards"]]
 
     if hard:
         print(f"\n=== Documented name not in the signature ({len(hard)}) ===")
         for h in hard:
-            print(f"\n  {h['file']}:{h['line']}  {h['func']}()")
+            mark = "  [guard]" if h["guards"] else ""
+            print(f"\n  {h['file']}:{h['line']}  {h['func']}(){mark}")
             print(f"    docstring:  {h['param']}")
             print(f"    code:       {', '.join(h['sig'][:8])}")
     if soft:
         print(f"\n=== Documented default differs ({len(soft)}) ===")
         for h in soft[: (len(soft) if verbose else 30)]:
-            print(f"\n  {h['file']}:{h['line']}  {h['func']}()  {h['param']}")
+            mark = "  [guard]" if h["guards"] else ""
+            print(f"\n  {h['file']}:{h['line']}  {h['func']}()  {h['param']}{mark}")
             print(f"    docstring:  {h['doc_default']}")
             print(f"    code:       {h['real_default']}")
         if not verbose and len(soft) > 30:
@@ -865,6 +919,9 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
     print(f"  author switched it off: {COUNTS['suppressed']} (`# numpydoc ignore=PR02` in the signature)")
     if COUNTS["compat_blind"]:
         print(f"  opaque decorator:       {COUNTS['compat_blind']} (cannot tell which extra names it accepts)")
+    if guarded:
+        print(f"  🔴 about a guard:         {len(guarded)}"
+              f" (the name reads as protective, so a wrong line here costs more)")
     print(common.findings_line(len(hard), len(soft)))
     print(stamp.line(__file__, ["common.py"]))
 
