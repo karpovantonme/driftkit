@@ -69,11 +69,21 @@ SKIP_DIRS = common.SKIP_DIRS | {
     # `Example: { "location_name": "Basel" }` at parameter indent reads as an
     # argument there.
     "samples", ".tox",
-    # Dead code kept in the tree. statsmodels holds a top-level `archive/`, and
-    # 12 of the 13 findings there came out of it: textually real, in a
-    # directory that is not shipped and that nobody will patch.
-    "archive", "_archive", "attic", "legacy", "deprecated", "vendor", "vendored",
-    "third_party", "3rdparty",
+    # Two reasons to skip, and they are not the same reason.
+    #
+    # Not shipped: statsmodels keeps a top-level `archive/`, and 12 of the 13
+    # findings there came out of it. Textually real, in a directory that no
+    # release contains and nobody will patch.
+    #
+    # Not ours: vendored copies belong to another project, and a fix has to go
+    # upstream rather than here.
+    #
+    # 🔴 `legacy` and `deprecated` are deliberately absent. keras ships 24
+    # Python files under `legacy/`, people import them, and a wrong docstring
+    # there is as wrong as anywhere else. Skipping them dropped 38 functions
+    # from the count and called it an improvement.
+    "archive", "_archive", "attic",
+    "vendor", "vendored", "third_party", "3rdparty",
 }
 
 # A trailing colon after the heading is allowed. pyGSTi writes `Returns:` above
@@ -399,6 +409,82 @@ def doc_params_google(doc):
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# Sphinx, also called reST field lists.
+#
+# The third dialect and the largest one missing. Added 20.08.2026 after a run
+# on deepinv read 231 files, parsed 14 functions and reported the project
+# checked: 857 of its 871 documented functions are written this way, and the
+# tree holds 4697 `:param` fields.
+#
+# The shape, and the one thing that makes it awkward:
+#
+#     :param x: description                 <- no type
+#     :param int max_iter: description       <- type before the name
+#     :param torch.Tensor x: description     <- dotted type
+#     :param torch.device, str device: text  <- comma INSIDE the type
+#
+# 🔴 The name is the last whitespace-separated token before the closing colon,
+# never the first. Splitting on the comma would read `torch.device` as one
+# parameter and `str device` as another, and deepinv writes 43 of those.
+# A trailing comma on the type (`:param bool, as_memmap:`) is a typo in the
+# source rather than a second name, and the same rule handles it.
+SPHINX_FIELD = re.compile(
+    r'^(?P<ind>\s*):(?P<kind>param|parameter|arg|argument|key|keyword)\s+'
+    r'(?P<head>[^:]+?)\s*:(?P<desc>.*)$')
+# Any other field ends the run of parameters. `:return:` and `:rtype:` are the
+# common ones, and an unknown field is treated the same way rather than
+# swallowed as a description.
+SPHINX_OTHER = re.compile(r'^\s*:(?!param|parameter|arg|argument|key|keyword)\w[\w\s]*:')
+SPHINX_TYPE = re.compile(r'^\s*:type\s+(?P<name>\w+)\s*:\s*(?P<type>.*)$')
+
+
+def doc_params_sphinx(doc):
+    """-> [(names, type string, line number)], the same shape as doc_params."""
+    lines = strip_fences(cut_at_examples(doc.split('\n')))
+    types = {}
+    for ln in lines:
+        m = SPHINX_TYPE.match(ln)
+        if m:
+            types[m.group('name')] = m.group('type').strip()
+
+    out = []
+    for i, ln in enumerate(lines):
+        m = SPHINX_FIELD.match(ln)
+        if not m:
+            continue
+        head = m.group('head').strip()
+        if not head:
+            continue
+        parts = head.split()
+        name = parts[-1]
+        if not re.fullmatch(r'\*{0,2}\w+', name):
+            continue
+        name = name.lstrip('*')
+        if is_note(name) or name in NOT_A_NAME:
+            continue
+        declared = " ".join(parts[:-1]).rstrip(',').strip()
+        typ = declared or types.get(name, "")
+
+        # The description carries the default in this dialect, the same way it
+        # does in Google style, so it rides along and continuation lines join
+        # it. Sphinx wraps as freely as anything else.
+        desc = m.group('desc').strip()
+        ind = len(m.group('ind'))
+        for nxt in lines[i + 1:]:
+            if not nxt.strip():
+                break
+            if SPHINX_FIELD.match(nxt) or SPHINX_OTHER.match(nxt):
+                break
+            if len(nxt) - len(nxt.lstrip()) <= ind:
+                break
+            desc += ' ' + nxt.strip()
+
+        out.append(([name], f"{typ} {desc}".strip(), i))
+    return out
+
+
 def doc_params_any(doc):
     """numpydoc first, Google style when it finds nothing.
 
@@ -408,7 +494,7 @@ def doc_params_any(doc):
     never underlines a heading. So the stricter dialect is tried first and the
     looser one only answers where the strict one saw nothing at all.
     """
-    return doc_params(doc) or doc_params_google(doc)
+    return doc_params(doc) or doc_params_google(doc) or doc_params_sphinx(doc)
 
 
 # Compatibility decorators accept names beyond the ones in the signature.
@@ -549,8 +635,22 @@ def replaced_in_body(fn, name: str) -> bool:
                 if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or):
                     if any(isinstance(x, ast.Name) and x.id == name for x in v.values):
                         return True
+                # `x = Y if cond else x` keeps the argument when the
+                # condition fails, so the documented default still describes
+                # what happens by default.
+                #
+                # 🔴 Treating every ternary as a replacement silenced a real
+                # finding: keras writes
+                # `safe_mode = scope if scope is not None else safe_mode`,
+                # and suppressing it hid a docstring that said a security
+                # control defaults to off when it defaults to on.
                 if isinstance(v, ast.IfExp):
-                    return True
+                    keeps_arg = any(
+                        isinstance(x, ast.Name) and x.id == name
+                        for x in ast.walk(v.orelse)
+                    )
+                    if not keeps_arg:
+                        return True
         # `if x is None: x = something`
         if isinstance(node, ast.If):
             test = node.test

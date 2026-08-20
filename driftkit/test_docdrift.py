@@ -1356,6 +1356,40 @@ def f(tlist, T=0.0):
 ''')
         self.assertEqual([x["param"] for x in h], ["T"])
 
+    def test_a_ternary_that_keeps_the_argument_is_not_a_replacement(self):
+        """The narrowing that took two attempts to get right.
+
+        `x = scope if scope is not None else x` keeps the argument when the
+        condition fails, so the documented default still describes the default
+        path. Treating every ternary as a replacement silenced a real finding
+        in keras, where a docstring said a security control defaults to off
+        while it defaults to on.
+        """
+        h = findings_in('''
+def f(safe_mode=True):
+    """Does the thing.
+
+    Args:
+        safe_mode: Boolean, defaults to False. If True, disables unsafe things.
+    """
+    scope = get_scope()
+    safe_mode = scope if scope is not None else safe_mode
+''')
+        self.assertEqual([(x["kind"], x["param"]) for x in h], [("B", "safe_mode")])
+
+    def test_a_ternary_that_drops_the_argument_is_a_replacement(self):
+        self.assertEqual(findings_in('''
+def f(tlist, T=0.0):
+    """Does the thing.
+
+    Parameters
+    ----------
+    T : float, default=tlist[-1]
+        The period.
+    """
+    T = tlist[-1] if T == 0.0 else tlist[0]
+'''), [])
+
     def test_a_google_heading_ends_a_numpydoc_section(self):
         """pyvo writes `Returns:` inside a numpydoc block with no underline.
 
@@ -1376,11 +1410,96 @@ def f(a):
     """
 '''), [])
 
-    def test_dead_directories_are_skipped(self):
+    def test_directories_that_are_dead_or_not_ours_are_skipped(self):
         """12 of 13 findings on statsmodels came out of a top-level archive/
-        that is not shipped and that nobody will patch."""
-        for d in ("archive", "legacy", "deprecated", "vendored", "third_party"):
+        that no release contains."""
+        for d in ("archive", "_archive", "attic", "vendor", "vendored",
+                  "third_party", "3rdparty"):
             self.assertIn(d, docdrift.SKIP_DIRS, d)
+
+    def test_shipped_but_old_directories_are_not_skipped(self):
+        """The correction to the line above, made the same day.
+
+        keras ships 24 Python files under `legacy/` and people import them. A
+        wrong docstring there is as wrong as anywhere else. Skipping them
+        dropped 38 functions from the count and looked like an improvement.
+        """
+        for d in ("legacy", "deprecated", "compat", "old"):
+            self.assertNotIn(d, docdrift.SKIP_DIRS, d)
+
+
+class TestSphinxDialect(unittest.TestCase):
+    """The third dialect, added 20.08.2026.
+
+    On deepinv the tool parsed 14 of 871 documented functions and reported the
+    project checked. 857 of them are Sphinx field lists, and the tree holds
+    4697 `:param` fields. After this it parses 869 and finds 25.
+    """
+
+    def test_a_plain_field_is_read(self):
+        h = findings_in('''
+def f(x):
+    """Does the thing.
+
+    :param wrongname: the thing
+    """
+''')
+        self.assertEqual([x["param"] for x in h], ["wrongname"])
+
+    def test_the_type_comes_before_the_name(self):
+        h = findings_in('''
+def f(max_iter):
+    """Does the thing.
+
+    :param int wrong_name: how many
+    """
+''')
+        self.assertEqual([x["param"] for x in h], ["wrong_name"])
+
+    def test_a_comma_inside_the_type_is_not_a_second_parameter(self):
+        """deepinv writes `:param torch.device, str device:` 43 times.
+
+        Splitting on the comma would read torch.device as one parameter and
+        `str device` as another, and neither exists.
+        """
+        parsed = docdrift.doc_params_sphinx(
+            "    :param torch.device, str device: where to put it\n")
+        self.assertEqual([n for names, _, _ in parsed for n in names], ["device"])
+
+    def test_a_stray_comma_after_the_type_is_a_typo_not_a_name(self):
+        """deepinv writes `:param bool, as_memmap:`. The name is still the last
+        token."""
+        parsed = docdrift.doc_params_sphinx("    :param bool, as_memmap: text\n")
+        self.assertEqual([n for names, _, _ in parsed for n in names], ["as_memmap"])
+
+    def test_a_return_field_ends_the_parameters(self):
+        self.assertEqual(findings_in('''
+def f(a):
+    """Does the thing.
+
+    :param a: the first
+    :return: something useful
+    :rtype: int
+    """
+'''), [])
+
+    def test_a_wrapped_description_carries_the_default(self):
+        """The default lives in the description in this dialect, and Sphinx
+        wraps as freely as anything else."""
+        h = findings_in('''
+def f(max_iter=50):
+    """Does the thing.
+
+    :param int max_iter: how many iterations to run before giving
+        up. Defaults to 100.
+    """
+''')
+        self.assertEqual([(x["kind"], x["param"]) for x in h], [("B", "max_iter")])
+
+    def test_a_separate_type_field_is_picked_up(self):
+        parsed = docdrift.doc_params_sphinx(
+            "    :param x: the thing\n    :type x: int\n")
+        self.assertEqual(parsed[0][1].split()[0], "int")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
