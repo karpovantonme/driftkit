@@ -1248,5 +1248,139 @@ def deserialize(config, safe_mode=True):
         self.assertEqual(h[0]["param"], "safe_mode")
         self.assertTrue(docdrift.guards_something(h[0]["param"]))
 
+
+class TestCoverageHonesty(unittest.TestCase):
+    """A report that looks clean while the parser saw nothing.
+
+    On deepinv the tool read 231 files, printed `functions with Parameters: 14`
+    and found one thing. The tree holds 4697 `:param` fields: 857 of 871
+    documented functions were in a dialect this file does not read, and nothing
+    in the output said so. The rule "zero functions in a non-empty tree" does
+    not catch it, because the number was 14 rather than 0.
+    """
+
+    def test_every_dialect_counts_as_documenting(self):
+        for line in (
+            "    :param int in_channels: Number of input channels.",
+            "    :param torch.Tensor y: data",
+            ":param x: plain",
+            "    :type x: int",
+            "    @param x: epytext",
+            r"    \param x doxygen",
+            "    Args:",
+            "    Params:",
+            "    Parameters",
+        ):
+            self.assertTrue(docdrift.DOCUMENTS_SOMETHING.search(line), line)
+
+    def test_prose_does_not(self):
+        for line in ("    Just prose about the function.",
+                     "    See also: something",
+                     "    Returns the value."):
+            self.assertFalse(docdrift.DOCUMENTS_SOMETHING.search(line), line)
+
+    def test_the_sphinx_type_comes_before_the_name(self):
+        """The shape that made the first version of this warning understate itself.
+
+        `:param int in_channels:` carries the type ahead of the name, so a
+        pattern wanting one word before the colon counted 88 unread docstrings
+        where there were 857.
+        """
+        self.assertTrue(docdrift.DOCUMENTS_SOMETHING.search(":param int x: t"))
+        self.assertTrue(docdrift.DOCUMENTS_SOMETHING.search(":param dict[str, int] x: t"))
+
+
+class TestFoundOnTheFamiliarRepoSweep(unittest.TestCase):
+    """Five defects a run over 10 repositories with merged work turned up.
+
+    48 findings, 43 real, 5 ours.
+    """
+
+    def test_a_thousands_separator_does_not_cut_the_value(self):
+        """toqito writes `(default: 33,592)` against `33_592` in the code.
+
+        The comma read as a list separator, the value came out as 33, and the
+        two never matched.
+        """
+        self.assertEqual(docdrift.clean_default("33,592)"), "33,592")
+        self.assertEqual(docdrift.norm("33,592"), "33592")
+        self.assertEqual(docdrift.norm("33_592"), "33592")
+
+    def test_a_real_list_separator_still_cuts(self):
+        self.assertEqual(docdrift.clean_default('"anti", or something'), '"anti"')
+        self.assertEqual(docdrift.clean_default("a, b"), "a")
+
+    def test_a_subscript_keeps_its_brackets(self):
+        """qutip documents `default=tlist[-1]`. The value was read as
+        `tlist[-1` and printed with the truncation visible in the report."""
+        self.assertEqual(docdrift.clean_default("tlist[-1]"), "tlist[-1]")
+
+    def test_a_sentinel_swapped_in_the_body_is_not_a_mismatch(self):
+        """`T: float = 0.0` with `T = T or tlist[-1]` on the way in.
+
+        The docstring names what the argument becomes, which is the honest
+        thing to document. qutip hides that swap inside the else branch of the
+        first if, so the search has to look inside the opening statements.
+        """
+        self.assertEqual(findings_in('''
+def f(tlist, T=0.0):
+    """Does the thing.
+
+    Parameters
+    ----------
+    T : float, default=tlist[-1]
+        The period.
+    """
+    if isinstance(tlist, list):
+        pass
+    else:
+        T = T or tlist[-1]
+'''), [])
+
+    def test_a_reassignment_further_down_is_not_a_default(self):
+        """Otherwise any argument written to anywhere would go unchecked."""
+        h = findings_in('''
+def f(tlist, T=0.0):
+    """Does the thing.
+
+    Parameters
+    ----------
+    T : float, default=99
+        The period.
+    """
+    a = 1
+    b = 2
+    c = 3
+    d = 4
+    T = T or tlist[-1]
+''')
+        self.assertEqual([x["param"] for x in h], ["T"])
+
+    def test_a_google_heading_ends_a_numpydoc_section(self):
+        """pyvo writes `Returns:` inside a numpydoc block with no underline.
+
+        Only the underlined form ended the section, so the word Returns parsed
+        as a parameter of the function.
+        """
+        self.assertEqual(findings_in('''
+def f(a):
+    """Does the thing.
+
+    Parameters
+    ----------
+    a : int
+        The first one.
+
+    Returns:
+        Something useful.
+    """
+'''), [])
+
+    def test_dead_directories_are_skipped(self):
+        """12 of 13 findings on statsmodels came out of a top-level archive/
+        that is not shipped and that nobody will patch."""
+        for d in ("archive", "legacy", "deprecated", "vendored", "third_party"):
+            self.assertIn(d, docdrift.SKIP_DIRS, d)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

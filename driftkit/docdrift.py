@@ -69,6 +69,11 @@ SKIP_DIRS = common.SKIP_DIRS | {
     # `Example: { "location_name": "Basel" }` at parameter indent reads as an
     # argument there.
     "samples", ".tox",
+    # Dead code kept in the tree. statsmodels holds a top-level `archive/`, and
+    # 12 of the 13 findings there came out of it: textually real, in a
+    # directory that is not shipped and that nobody will patch.
+    "archive", "_archive", "attic", "legacy", "deprecated", "vendor", "vendored",
+    "third_party", "3rdparty",
 }
 
 # A trailing colon after the heading is allowed. pyGSTi writes `Returns:` above
@@ -101,8 +106,40 @@ PARAMLINE = re.compile(
 # generic `default[\s:=]+` branch matches "Default to `-1`" as the word
 # `default` plus a separator, and the value read out is `to`. Seen in
 # keras/src/ops/nn.py.
+# The value ends at a sentence boundary, at a semicolon, or at a bracket that
+# is not part of the value itself.
+#
+# 🔴 Two ways this was wrong, both found on live runs 20.08.2026. A comma is a
+# thousands separator as often as it is a list separator: `(default: 33,592)`
+# was read as `33` and never matched `33_592`. And a subscript carries its own
+# brackets: `default=tlist[-1]` was read as `tlist[-1`, which matched nothing
+# and printed a finding with a visibly truncated value.
+#
+# Brackets are now balanced rather than banned, and a comma only ends the value
+# when digits do not sit on both sides of it.
 DEFAULT_IN_TYPE = re.compile(
-    r'(?:defaults?\s+to\s+|default[\s:=]+)(?P<val>[^,;)\]]+?)(?=\.\s|[,;)\]]|$)', re.I)
+    r'(?:defaults?\s+to\s+|default[\s:=]+)(?P<val>.+?)(?=\.\s|;|$)', re.I)
+
+
+def clean_default(raw: str) -> str:
+    """Cut a captured default at the first separator that is really one."""
+    out, depth = [], 0
+    for i, ch in enumerate(raw):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch == ",":
+            # A thousands separator has digits on both sides. A list separator
+            # does not.
+            left = raw[i - 1] if i else ""
+            right = raw[i + 1] if i + 1 < len(raw) else ""
+            if not (left.isdigit() and right.isdigit()):
+                break
+        out.append(ch)
+    return "".join(out).strip()
 EXAMPLES = re.compile(r'^\s*Examples?\s*:?\s*$', re.I)
 # Notes inside a Parameters section parse as arguments: the line
 # `TODO: looks like not used yet` is shaped exactly like `name : type`.
@@ -202,7 +239,16 @@ def doc_params(doc):
             j = i + 2
             while j < len(lines):
                 ln = lines[j]
-                if ANYSEC.match(ln) and j + 1 < len(lines) and UNDER.match(lines[j + 1]):
+                # A heading ends the section when it is underlined, which is
+                # how numpydoc writes one, and also when it simply ends in a
+                # colon. Mixed docstrings exist: pyvo writes `Returns:` in the
+                # Google form inside a numpydoc block, and with only the
+                # underlined form recognised the word `Returns` parsed as a
+                # parameter of the function.
+                if ANYSEC.match(ln) and (
+                    (j + 1 < len(lines) and UNDER.match(lines[j + 1]))
+                    or ln.rstrip().endswith(":")
+                ):
                     break
                 m = PARAMLINE.match(ln)
                 if m and ln.strip():
@@ -477,6 +523,48 @@ def is_property(fn) -> bool:
     return False
 
 
+def replaced_in_body(fn, name: str) -> bool:
+    """Does the body immediately swap this argument for something else.
+
+    A sentinel default is a real idiom and the docstring that names the real
+    value is telling the truth. qutip writes `T: float = 0.0` and then
+    `T = T or tlist[-1]` on the first line, and documents `default=tlist[-1]`.
+    Comparing against the signature alone calls that a mismatch, and it is not.
+
+    Only the opening statements count, but the search goes inside them: qutip
+    puts `T = T or tlist[-1]` in the else branch of the first `if`, and looking
+    at the top level alone missed it. Reading the whole body instead would
+    silence real findings, since reassigning an argument halfway down is
+    ordinary flow rather than a default.
+    """
+    opening = []
+    for st in fn.body[:4]:
+        opening.extend(ast.walk(st))
+    for node in opening:
+        # `x = x or something`
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            tgt = node.targets[0]
+            if isinstance(tgt, ast.Name) and tgt.id == name:
+                v = node.value
+                if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or):
+                    if any(isinstance(x, ast.Name) and x.id == name for x in v.values):
+                        return True
+                if isinstance(v, ast.IfExp):
+                    return True
+        # `if x is None: x = something`
+        if isinstance(node, ast.If):
+            test = node.test
+            if isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) \
+                    and test.left.id == name \
+                    and any(isinstance(o, (ast.Is, ast.Eq)) for o in test.ops):
+                for inner in node.body:
+                    if isinstance(inner, ast.Assign) and len(inner.targets) == 1:
+                        it = inner.targets[0]
+                        if isinstance(it, ast.Name) and it.id == name:
+                            return True
+    return False
+
+
 def sig_params(fn):
     a = fn.args
     names, defaults = [], {}
@@ -559,6 +647,12 @@ def norm(v):
         s = s.strip('`"\'').strip().rstrip('.').strip()
         if s == before:
             break
+    # A thousands separator is presentation, not value. The docstring writes
+    # 33,592 and the code writes 33_592; both mean the same number and the
+    # comparison has to see that. Python's own separator goes too, since the
+    # literal side arrives as text here.
+    if re.fullmatch(r'-?\d{1,3}(?:[,_]\d{3})+(?:\.\d+)?', s):
+        s = s.replace(',', '').replace('_', '')
     return {'true': 'True', 'false': 'False', 'none': 'None'}.get(s.lower(), s)
 
 
@@ -605,6 +699,15 @@ def scan_file(path, repo):
             continue
         dp = doc_params_any(doc)
         if not dp:
+            # A docstring is here and no parameters came out of it. Either it
+            # documents none, or it is written in a dialect this file cannot
+            # read. Counting the difference is the only thing standing between
+            # a clean report and a blind one: on deepinv the tool read 14
+            # functions out of 1232 documented, found nothing, and printed a
+            # coverage block that looked healthy. 1204 of those are Sphinx
+            # `:param x:` fields, a dialect not parsed here at all.
+            if DOCUMENTS_SOMETHING.search(doc):
+                COUNTS["unread_docstrings"] += 1
             continue
         COUNTS["funcs"] += 1
         names, defaults, star = sig_params(fn)
@@ -624,7 +727,12 @@ def scan_file(path, repo):
                         actual = lit(defaults[dn])
                         if actual is ...:
                             continue
-                        want = norm(m.group('val'))
+                        if replaced_in_body(fn, dn):
+                            # The signature holds a sentinel and the body swaps
+                            # it on the first line. The docstring names what it
+                            # becomes, and that is the honest thing to document.
+                            continue
+                        want = norm(clean_default(m.group('val')))
                         got = norm(repr(actual) if isinstance(actual, str) else actual)
                         # Sentinel `None`: the code says None, the docstring
                         # says what it turns into ("default: nx.Graph"). A
@@ -644,7 +752,26 @@ def scan_file(path, repo):
 # --------------------------------------------------------------------------
 
 
+# A docstring that names arguments in some dialect. Used only to tell "this
+# function documents nothing" apart from "this file cannot read how it does",
+# which is the difference between an honest zero and a silent one.
+#
+# 🔴 The Sphinx form puts the type BEFORE the name: `:param int in_channels:`.
+# A pattern demanding one word before the colon counted 88 unread docstrings on
+# deepinv where the tree holds 4697 `:param` fields, so the warning it printed
+# was itself an understatement.
+DOCUMENTS_SOMETHING = re.compile(
+    r'^\s*(?:'
+    r':(?:param|parameter|arg|argument|key|keyword|type)\s+[^:]+:'   # Sphinx / reST
+    r'|@(?:param|keyword|type)\s+\w+'                               # Epytext, old Epydoc
+    r'|\\param\b|@param\b'                                          # Doxygen, in C++ bindings
+    r'|Args?\s*:|Arguments\s*:|Keyword Args?\s*:'                   # Google
+    r'|Params?\s*:'                                                  # anndata writes `Params:`
+    r'|Parameters\s*:?\s*$'                                         # numpydoc heading
+    r')', re.M | re.I)
+
 COUNTS: Dict[str, int] = {"files": 0, "funcs": 0, "props": 0, "compat_blind": 0,
+                          "unread_docstrings": 0,
                           "unparsable": 0, "unreadable": 0, "numpydoc_failed": 0,
                           "suppressed": 0}
 
@@ -913,6 +1040,14 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
     if gap:
         print(f"  interpreter is older:   {gap}")
     print(f"  functions with Parameters: {COUNTS['funcs']}")
+    unread = COUNTS.get("unread_docstrings", 0)
+    if unread:
+        documented = COUNTS['funcs'] + unread
+        share = 100 * COUNTS['funcs'] / documented
+        mark = "🔴 " if share < 50 else ""
+        print(f"  {mark}docstrings not read:    {unread} of {documented} documented"
+              f" ({share:.0f}% parsed). A dialect this file does not know,"
+              f" most often Sphinx `:param x:`")
     print(f"  properties skipped:     {COUNTS['props']} (docstring describes what they return)")
     # Printed even at zero, like every other line here: a dismissal nobody sees
     # is how a report gets cleaner instead of more honest.
