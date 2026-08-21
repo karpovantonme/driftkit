@@ -7,7 +7,7 @@ in Python, `doxdrift` in C and C++, `swiftdrift` in Swift. What was not obvious
 until this week is how much of the remaining work is shared:
 
     /** @param count how many */        JSDoc, JavaScript and TypeScript
-     * @param count how many            Javadoc, Java
+     * @param count how many            Javadoc, Java  (done)
     /** @param int $count how many */   PHPDoc, PHP
     # @param [Integer] count            YARD, Ruby
     /// <param name="count">…</param>   XML doc, C#
@@ -43,6 +43,13 @@ means the parser went blind, whatever the findings say.
 WHAT MAKES EACH LANGUAGE AWKWARD, since the traps are not shared even though
 the markup is:
 
+  - **Java lets a declaration have no body.** An interface method or an
+    abstract one ends at the closing bracket with a semicolon, sometimes after
+    a `throws` clause. In JavaScript that exact shape is a call statement, so
+    the two languages need opposite answers to the same question;
+  - **Java annotations sit between the comment and the declaration** and take
+    arguments of their own: `@SuppressWarnings({"a", "b"})` holds braces that
+    are not a body and a bracket that is not a parameter list;
   - **JSDoc puts the type before the name**, `@param {string} name`, the
     opposite way round from Doxygen, and the braces nest: `{Array<{x: number}>}`
     cannot be matched with one regular expression;
@@ -70,6 +77,10 @@ KNOWN BLIND SPOTS, named rather than hidden:
     a name, and it was not a defect;
   - **generated code** is invisible here as it is to every other check in the
     kit;
+  - **`@param <T>` in Java** documents a type parameter, and binding one needs
+    the type parameters of the enclosing class as well as of the method: a
+    method inside `class Box<T>` documents `<T>` without declaring it. Reading
+    only the method would call every such line a defect, so they are skipped;
   - a doc comment separated from its declaration by a statement is left
     unbound on purpose: a file header followed by imports must not bind to the
     first function in the file.
@@ -236,12 +247,17 @@ def _js_doc_name(text: str, i: int) -> Optional[str]:
     return raw if re.fullmatch(r"[A-Za-z_$][\w$]*", raw) else None
 
 
-def js_blank(src: str) -> str:
+def c_blank(src: str, quotes: str = "'\"`") -> str:
     """Blank out strings and comments, keeping every offset and newline.
 
-    A template literal is blanked whole, `${…}` included. Code inside one is
-    never a declaration we are looking for, and keeping the braces would only
-    confuse the bracket matcher.
+    Shared by every language here whose comments are C shaped. `quotes` says
+    which characters open a string: JavaScript has three, Java has two, and
+    handing Java a backtick would send the scanner off looking for a closing
+    one that never comes.
+
+    A JavaScript template literal is blanked whole, `${…}` included. Code
+    inside one is never a declaration we are looking for, and keeping the
+    braces would only confuse the bracket matcher.
     """
     out = list(src)
     i, n = 0, len(src)
@@ -262,7 +278,7 @@ def js_blank(src: str) -> str:
                 out[i] = " "
                 out[min(i + 1, n - 1)] = " "
                 i += 2
-        elif c in "'\"`":
+        elif c in quotes:
             quote = c
             out[i] = " "
             i += 1
@@ -296,6 +312,10 @@ def _ident_start(text: str, i: int) -> Optional[int]:
     while j >= 0 and (text[j].isalnum() or text[j] in "_$"):
         j -= 1
     return j + 1 if IDENT.match(text[j + 1:]) else None
+
+
+def js_blank(src: str) -> str:
+    return c_blank(src, "'\"`")
 
 
 def _prev_token(text: str, i: int) -> str:
@@ -499,6 +519,138 @@ def _js_param_name(part: str) -> Optional[str]:
     return name
 
 
+
+# --------------------------------------------------------------------------
+# Java
+# --------------------------------------------------------------------------
+#
+# The markup is the same three characters, `@param name description`, and the
+# comment is the same `/** */`. Everything below is about the declaration.
+
+JAVA_TAG = re.compile(r"(?<![\w$@])@param\b")
+
+JAVA_TYPE_PARAM = re.compile(r"<\s*([A-Za-z_$][\w$]*)\s*>")
+
+JAVA_STOP = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "new", "synchronized",
+    "assert", "throw", "do", "else", "super", "this", "case", "instanceof",
+})
+
+JAVA_ANNOTATION = re.compile(r"@\s*[\w$.]+\s*")
+JAVA_ANNOTATION_IN_PARAM = re.compile(r"@[\w$.]+(?:\([^)]*\))?")
+
+
+def java_blocks(src: str) -> Iterator[Block]:
+    return js_blocks(src)
+
+
+def java_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    """Documented names and their offsets.
+
+    🔴 `@param <T>` documents a TYPE parameter, and this version does not
+    report those. Binding one needs the type parameters of the enclosing class
+    as well as of the method, since a method inside `class Box<T>` documents
+    `<T>` without declaring it. Reading only the method would call every such
+    line a defect. Counted, not judged.
+    """
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in JAVA_TAG.finditer(text):
+        i = skip_blank(text, m.end())
+        if i >= len(text) or text[i] == "\n":
+            continue
+        if JAVA_TYPE_PARAM.match(text[i:]):
+            continue
+        name = IDENT.match(text[i:])
+        if name and name.group(0) not in seen:
+            seen.add(name.group(0))
+            out.append((name.group(0), m.start()))
+    return out
+
+
+def java_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    """The declared name and its parameter names, or `None` if not bound.
+
+    Three things Java does that JavaScript does not:
+
+      - **annotations sit between the comment and the declaration**, and they
+        take arguments: `@SuppressWarnings({"a", "b"})`. Those braces are not
+        a body and that parenthesis is not a parameter list, so an annotation
+        is stepped over whole;
+      - **a declaration may have no body.** An interface method and an
+        abstract method end at `)` with a semicolon, sometimes after a
+        `throws` clause. In JavaScript that shape is a call statement;
+      - **overloads carry their own comment each**, so nothing is unioned
+        here. The reading stops at the first declaration.
+    """
+    cut = window.find("/**")
+    if cut >= 0:
+        window = window[:cut]
+    blank = c_blank(window, "'\"")
+    i, n, angle, prev_char = 0, len(blank), 0, ""
+    while i < n:
+        c = blank[i]
+        if c == "@":
+            m = JAVA_ANNOTATION.match(blank, i)
+            if m:
+                i = m.end()
+                if i < n and blank[i] == "(":
+                    close = match_pair(blank, i)
+                    if close < 0:
+                        return None
+                    i = close + 1
+                prev_char = ")"
+                continue
+        if c in ";}":
+            return None
+        if c == "<":
+            angle += 1
+        elif c == ">":
+            # `->` is a lambda and `>>` a shift, neither closes a type.
+            if prev_char not in ("-", "="):
+                angle = max(0, angle - 1)
+        elif c == "(" and angle == 0:
+            prev = _prev_token(blank, i)
+            if prev in JAVA_STOP or not IDENT.fullmatch(prev):
+                return None
+            close = match_pair(blank, i)
+            if close < 0:
+                return None
+            after = blank[close + 1:].lstrip()
+            if (after[:1] in ("{", ";")
+                    or after.startswith("throws")
+                    or after.startswith("default")):
+                return prev, _java_params(blank[i + 1:close])
+            return None
+        prev_char = c
+        i += 1
+    return None
+
+
+def _java_params(inner: str) -> List[str]:
+    out = []
+    for part in _split_top(inner):
+        name = _java_param_name(part)
+        if name:
+            out.append(name)
+    return out
+
+
+def _java_param_name(part: str) -> Optional[str]:
+    """The name is the last token. Everything before it is the type.
+
+    That is the whole rule, and it survives generics with commas inside them
+    because the splitting already happened at the right depth.
+    """
+    p = JAVA_ANNOTATION_IN_PARAM.sub(" ", part)
+    p = p.replace("...", " ")
+    p = re.sub(r"\[\s*\]", " ", p)   # `String[] a` and `String a[]` both
+    tokens = p.split()
+    if not tokens:
+        return None
+    return tokens[-1] if IDENT.fullmatch(tokens[-1]) else None
+
+
 # --------------------------------------------------------------------------
 # The registry
 # --------------------------------------------------------------------------
@@ -519,6 +671,13 @@ LANGS: Dict[str, Lang] = {
         blocks=js_blocks,
         doc_params=js_doc_params,
         signature=js_signature,
+    ),
+    "java": Lang(
+        name="java",
+        exts=(".java",),
+        blocks=java_blocks,
+        doc_params=java_doc_params,
+        signature=java_signature,
     ),
 }
 

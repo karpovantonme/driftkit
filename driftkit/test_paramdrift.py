@@ -291,3 +291,70 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJava(unittest.TestCase):
+    """Javadoc. The markup is the same tag, the declaration is not."""
+
+    def sig(self, window):
+        return paramdrift.java_signature(window)
+
+    def test_plain_method(self):
+        self.assertEqual(self.sig("public void greet(String a, int b) {"),
+                         ("greet", ["a", "b"]))
+
+    def test_the_name_is_the_last_token(self):
+        self.assertEqual(
+            self.sig("public static <T> void build(final Map<String, List<T>> in, "
+                     "int n) throws IOException {"),
+            ("build", ["in", "n"]))
+
+    def test_annotations_are_stepped_over(self):
+        """`@SuppressWarnings({\"a\"})` holds braces that are not a body and a
+        bracket that is not a parameter list."""
+        self.assertEqual(
+            self.sig('@SuppressWarnings({"a", "b"})\n  public void greet(String a) {'),
+            ("greet", ["a"]))
+
+    def test_parameter_annotations(self):
+        self.assertEqual(self.sig("void greet(@Nullable String a, @Named(\"x\") int b) {"),
+                         ("greet", ["a", "b"]))
+
+    def test_a_declaration_with_no_body(self):
+        """An interface method ends at the semicolon. In JavaScript that shape
+        is a call statement, which is why the two languages part here."""
+        self.assertEqual(self.sig("void greet(String a) throws IOException;"),
+                         ("greet", ["a"]))
+
+    def test_varargs_and_arrays(self):
+        self.assertEqual(self.sig("void greet(int... rest) {"), ("greet", ["rest"]))
+        self.assertEqual(self.sig("void greet(String[] a, String b[]) {"),
+                         ("greet", ["a", "b"]))
+
+    def test_a_record_header_is_a_parameter_list(self):
+        self.assertEqual(self.sig("public record Point(int x, int y) {"),
+                         ("Point", ["x", "y"]))
+
+    def test_a_field_is_not_a_declaration_to_bind_to(self):
+        self.assertIsNone(self.sig("private static final int LIMIT = 10;"))
+
+    def test_a_type_parameter_tag_is_not_reported(self):
+        """`@param <T>` documents a type parameter, and binding one needs the
+        enclosing class as well as the method."""
+        self.assertEqual(paramdrift.java_doc_params(" @param <T> the element type "), [])
+
+    def test_the_species(self):
+        src = ("/**\n * @param bean the thing\n */\n"
+               "V getValue(Object instance);\n")
+        self.assertEqual(names(src, "a.java"), ["bean"])
+
+    def test_a_correct_comment_is_silent(self):
+        src = ("/**\n * @param instance the thing\n */\n"
+               "V getValue(Object instance);\n")
+        self.assertEqual(names(src, "a.java"), [])
+
+    def test_overloads_are_not_unioned_in_java(self):
+        """Each Java overload carries its own comment, so unioning would only
+        hide findings."""
+        symbol, params = self.sig("void on(String a) {\n}\nvoid on(int b) {\n}")
+        self.assertEqual(params, ["a"])
