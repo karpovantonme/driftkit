@@ -53,7 +53,7 @@ A real run, not an illustration. 11 of those 16 sit in `archive/`, which is why 
 | `docdrift` | numpydoc `Parameters` against the real Python signature |
 | `doxdrift` | Doxygen `\param` and `\tparam` against the real C++ declaration |
 | `swiftdrift` | a Swift `- Parameter` against the declaration under it, without building the package |
-| `paramdrift` | a JSDoc or Javadoc `@param` against the JavaScript, TypeScript or Java signature under it |
+| `paramdrift` | a documented parameter name against the signature under it, in JavaScript, TypeScript, Java, C#, PHP, Ruby and Rust |
 | `ifacedrift` | protobuf against OpenAPI, when a project maintains both by hand |
 | `liftdrift` | a vendored copy against the upstream commit that fixed it |
 | `transdrift` | a translated page against the original it was translated from |

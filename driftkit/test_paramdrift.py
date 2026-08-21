@@ -358,3 +358,183 @@ class TestJava(unittest.TestCase):
         hide findings."""
         symbol, params = self.sig("void on(String a) {\n}\nvoid on(int b) {\n}")
         self.assertEqual(params, ["a"])
+
+
+class TestCSharp(unittest.TestCase):
+    """XML doc. The only dialect here whose markup is not a tag."""
+
+    def sig(self, window):
+        return paramdrift.cs_signature(window)
+
+    def test_the_name_is_a_quoted_attribute(self):
+        self.assertEqual(
+            [n for n, _ in paramdrift.cs_doc_params(
+                ' <param name="a">x</param>\n <typeparam name="T">y</typeparam>')],
+            ["a"])
+
+    def test_inheritdoc_is_not_bound(self):
+        self.assertIsNone(paramdrift.cs_doc_params(' <inheritdoc/>\n <param name="a">x</param>'))
+
+    def test_plain_method(self):
+        self.assertEqual(self.sig("public void Greet(string a, int b = 3) {"),
+                         ("Greet", ["a", "b"]))
+
+    def test_type_parameters_come_after_the_name(self):
+        """Java puts them before the return type, C# after the name, so the
+        token in front of the bracket is the closing angle."""
+        self.assertEqual(
+            self.sig("public Task<T> Get<T>(this string s, out int n) where T : class {"),
+            ("Get", ["s", "n"]))
+
+    def test_attributes_and_directives_are_stepped_over(self):
+        self.assertEqual(
+            self.sig('#if FEATURE_X\n  [MessageTemplateFormatMethod("t")]\n'
+                     '  void Write(string t);'),
+            ("Write", ["t"]))
+
+    def test_a_directive_between_the_bracket_and_the_body(self):
+        """Serilog writes the body behind `#if`, and 78 of its 372 documented
+        comments were unbound by that alone."""
+        self.assertEqual(
+            self.sig("ILogger ForContext(IEnumerable<T> enrichers)\n#if FEATURE_X\n{"),
+            ("ForContext", ["enrichers"]))
+
+    def test_a_constructor_chained_to_another_one(self):
+        self.assertEqual(
+            self.sig("public CodedOutputStream(Stream output) : this(output, 4096) { }"),
+            ("CodedOutputStream", ["output"]))
+
+    def test_an_operator_has_no_identifier_before_the_bracket(self):
+        symbol, params = self.sig(
+            "public static bool operator ==(ByteString lhs, ByteString rhs) {")
+        self.assertEqual(params, ["lhs", "rhs"])
+
+    def test_a_call_is_not_a_declaration(self):
+        self.assertIsNone(self.sig("return Foo(x);"))
+        self.assertIsNone(self.sig("var y = Foo(x);"))
+        self.assertIsNone(self.sig("obj.Foo(x);"))
+
+    def test_the_species(self):
+        src = ('/// <param name="oldName">x</param>\n'
+               'public void Greet(string newName) { }\n')
+        self.assertEqual(names(src, "a.cs"), ["oldName"])
+
+
+class TestPhp(unittest.TestCase):
+    """PHPDoc. The sigil does the work, so the type never needs reading."""
+
+    def sig(self, window):
+        return paramdrift.php_signature(window)
+
+    def test_the_name_is_the_dollar_token(self):
+        got = paramdrift.php_doc_params(
+            " @param array<string, list<int>> $rows the rows\n @param int $n\n")
+        self.assertEqual([n for n, _ in got], ["rows", "n"])
+
+    def test_a_generic_type_with_a_comma_needs_no_parsing(self):
+        self.assertEqual(self.sig("public function greet(string $a, int $b = 3): void {"),
+                         ("greet", ["a", "b"]))
+
+    def test_variadic_and_by_reference(self):
+        self.assertEqual(self.sig("function greet(array &$rows, ...$rest) {"),
+                         ("greet", ["rows", "rest"]))
+
+    def test_promoted_constructor_properties(self):
+        self.assertEqual(self.sig("public function __construct(private string $a) {"),
+                         ("__construct", ["a"]))
+
+    def test_an_interface_method_ends_at_the_semicolon(self):
+        self.assertEqual(self.sig("public function greet(string $a);"), ("greet", ["a"]))
+
+    def test_a_call_is_not_a_declaration(self):
+        """WP-CLI documents a hook's arguments in a docblock above the call
+        that fires it, and a bracket followed by a semicolon has the same
+        shape as an abstract method."""
+        self.assertIsNone(self.sig("return WP_CLI::do_hook('x', $all_formats);"))
+
+    def test_func_get_args_means_nothing_to_compare(self):
+        symbol, params = self.sig(
+            "public static function decodeJson()\n{\n    $args = func_get_args();")
+        self.assertEqual(params, [paramdrift.OPAQUE])
+
+    def test_the_species(self):
+        src = ("/**\n * @param string $oldName x\n */\n"
+               "function greet(string $newName) {}\n")
+        self.assertEqual(names(src, "a.php"), ["oldName"])
+
+
+class TestRuby(unittest.TestCase):
+    """YARD. Both orders of name and type are written in real code."""
+
+    def sig(self, window):
+        return paramdrift.rb_signature(window)
+
+    def test_the_name_is_the_token_not_in_brackets(self):
+        got = paramdrift.rb_doc_params(
+            " @param name [String] the name\n @param [Integer] count how many\n")
+        self.assertEqual([n for n, _ in got], ["name", "count"])
+
+    def test_every_kind_of_parameter(self):
+        self.assertEqual(self.sig("def greet(a, b = 1, *rest, key:, **opts, &blk)"),
+                         ("greet", ["a", "b", "rest", "key", "opts", "blk"]))
+
+    def test_parentheses_are_optional(self):
+        self.assertEqual(self.sig("def self.greet a, b"), ("greet", ["a", "b"]))
+
+    def test_a_visibility_modifier_in_front(self):
+        self.assertEqual(self.sig("private def greet(a)"), ("greet", ["a"]))
+
+    def test_something_that_is_not_a_def(self):
+        self.assertIsNone(self.sig("attr_accessor :name"))
+
+    def test_the_species(self):
+        src = ("# @param [Range] range or node\n"
+               "# @param [Integer] size\n"
+               "def remove_preceding(node_or_range, size)\n")
+        self.assertEqual(names(src, "a.rb"), ["range"])
+
+
+class TestRust(unittest.TestCase):
+    """rustdoc has no tag at all, only a markdown section."""
+
+    def sig(self, window):
+        return paramdrift.rs_signature(window)
+
+    def test_only_backticked_names_under_an_arguments_heading(self):
+        got = paramdrift.rs_doc_params(
+            "   Does a thing with `x`.\n\n   # Arguments\n\n"
+            "   * `a` - the first\n   * `b` - the second\n\n"
+            "   # Panics\n\n   * `c` - not an argument\n")
+        self.assertEqual([n for n, _ in got], ["a", "b"])
+
+    def test_no_arguments_section_means_nothing_documented(self):
+        self.assertEqual(paramdrift.rs_doc_params("   Takes `a` and `b`.\n"), [])
+
+    def test_the_name_is_before_the_colon(self):
+        """The opposite end from Java, where the name is the last token."""
+        self.assertEqual(self.sig("pub fn greet(a: &str, b: usize) -> Result<()> {"),
+                         ("greet", ["a", "b"]))
+
+    def test_the_receiver_is_not_an_argument(self):
+        self.assertEqual(self.sig("pub fn greet(&mut self, a: u8) -> u8 {"),
+                         ("greet", ["a"]))
+
+    def test_an_apostrophe_is_a_lifetime_and_not_a_quote(self):
+        """🔴 A blanker told to treat `'` as a string opener erased everything
+        between two lifetimes. On qdrant that turned a 7 argument signature
+        into a 1 argument one and manufactured 6 findings."""
+        self.assertEqual(
+            self.sig("fn find<'a>(data: impl Iterator<Item = u8> + 'a + Clone, "
+                     "rows: &[u8], count: usize) -> u8 {"),
+            ("find", ["data", "rows", "count"]))
+
+    def test_attributes_and_where_clauses(self):
+        self.assertEqual(
+            self.sig("#[inline]\npub fn greet<T: Trait>(a: T, b: u8) -> u8 where T: Copy {"),
+            ("greet", ["a", "b"]))
+
+    def test_the_species(self):
+        src = ("/// Does a thing.\n///\n/// # Arguments\n///\n"
+               "/// * `op` - the operation\n"
+               "pub fn handle(op_num: u64, operation: F) -> bool {\n")
+        self.assertEqual(names(src, "a.rs"), ["op"])
