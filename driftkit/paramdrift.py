@@ -286,6 +286,18 @@ def js_blank(src: str) -> str:
     return "".join(out)
 
 
+def _ident_start(text: str, i: int) -> Optional[int]:
+    """Where the identifier ending just before `i` begins, or None."""
+    j = i - 1
+    while j >= 0 and text[j] in " \t\n\r":
+        j -= 1
+    if j < 0 or not (text[j].isalnum() or text[j] in "_$"):
+        return None
+    while j >= 0 and (text[j].isalnum() or text[j] in "_$"):
+        j -= 1
+    return j + 1 if IDENT.match(text[j + 1:]) else None
+
+
 def _prev_token(text: str, i: int) -> str:
     """The word or symbol immediately before position `i`."""
     j = i - 1
@@ -345,6 +357,18 @@ def js_signature(window: str) -> Optional[Tuple[str, List[str]]]:
             # `=>` is an arrow, not a closing angle bracket.
             if prev_char != "=":
                 angle = max(0, angle - 1)
+            elif not bound and angle == 0:
+                # 🔴 An arrow function with one argument needs no parentheses:
+                # `e => {`. Lighthouse writes `/** @param {Event} e */ e => {`
+                # inline, and a scanner looking only for a parameter list walks
+                # straight past it into the first call in the body and reports
+                # the argument as missing. It was the check's first false
+                # positive on a live tree.
+                start = _ident_start(blank, i - 1)
+                if start is not None:
+                    name = IDENT.match(blank[start:]).group(0)
+                    if name not in JS_STOP:
+                        return _js_symbol(blank[:start]), [name]
         elif c == "(" and angle == 0:
             prev = _prev_token(blank, i)
             close = match_pair(blank, i)
@@ -354,7 +378,11 @@ def js_signature(window: str) -> Optional[Tuple[str, List[str]]]:
                 break
             after = blank[close + 1:].lstrip()
             is_body = after[:2] == "=>" or after[:1] == "{"
-            is_type = after[:1] in (":", ";")
+            # A return type, `function f(a: string): void`. A closing bracket
+            # followed straight by a semicolon is a call statement, not a
+            # declaration, and reading it as one bound a Lighthouse comment to
+            # `document.querySelector(...)`.
+            is_type = after[:1] == ":"
             if not (is_body or is_type):
                 if not bound:
                     return None
@@ -511,6 +539,7 @@ class Report:
     bound: int = 0
     opaque: int = 0
     findings: List[dict] = dc_field(default_factory=list)
+    unbound: List[Tuple[str, int, str]] = dc_field(default_factory=list)
     by_lang: Dict[str, List[int]] = dc_field(default_factory=dict)
 
 
@@ -527,8 +556,14 @@ def scan_text(src: str, rel: str, lang: Lang, report: Report) -> None:
             continue
         report.blocks_with_params += 1
         seen[1] += 1
-        sig = lang.signature(src[block.end:block.end + WINDOW])
+        window = src[block.end:block.end + WINDOW]
+        sig = lang.signature(window)
         if sig is None:
+            # Kept rather than counted, so `-v` can show what went unmatched.
+            # A percentage that falls says the parser went blind; this list
+            # says on what.
+            report.unbound.append(
+                (rel, line_at(starts, block.end), " ".join(window.split())[:70]))
             continue
         report.bound += 1
         seen[0] += 1
@@ -610,6 +645,12 @@ def print_report(report: Report, root: str, verbose: bool = False) -> None:
           f"(a destructured argument has no name)")
     print(common.findings_line(len(report.findings), 0))
     print(stamp.line(__file__, ("common.py",)))
+    if verbose and report.unbound:
+        print()
+        print(f"--- Documented comments with no declaration under them "
+              f"({len(report.unbound)}) ---")
+        for where, line, tail in report.unbound:
+            print(f"  {where}:{line}  {tail}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
