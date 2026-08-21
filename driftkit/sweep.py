@@ -110,6 +110,7 @@ def survey(root: str) -> Dict[str, object]:
         "proto": [], "openapi": [], "go": 0, "changelog": [], "helm_tests": [],
         "lifted_links": 0, "locales": {}, "metadata": [], "workflows": False,
         "generated_spec": False, "text_files": 0, "py": 0, "hpp": 0,
+        "js": 0,
     }
     for dirpath, _dirs, names in _walk(root):
         rel = os.path.relpath(dirpath, root)
@@ -144,6 +145,8 @@ def survey(root: str) -> Dict[str, object]:
                 s["hpp"] = int(s["hpp"]) + 1  # type: ignore[arg-type]
             elif low.endswith((".md", ".rst", ".txt", ".yaml", ".yml", ".c", ".h", ".py", ".rs", ".sh")):
                 s["text_files"] = int(s["text_files"]) + 1  # type: ignore[arg-type]
+            if low.endswith((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")):
+                s["js"] = int(s["js"]) + 1  # type: ignore[arg-type]
             if n in ("pyproject.toml", "setup.py", "setup.cfg", "go.mod", "Cargo.toml", "package.json"):
                 if dirpath == root:
                     s["metadata"].append(n)  # type: ignore[union-attr]
@@ -262,6 +265,11 @@ def build_plan(root: str, s: Dict[str, object], network: bool) -> List[Plan]:
         plans.append(Plan("doxdrift", True, f"{s['hpp']} .hpp headers", [[root]]))
     else:
         plans.append(Plan("doxdrift", False, "almost no .hpp headers"))
+
+    if int(s["js"]) >= 5:  # type: ignore[arg-type]
+        plans.append(Plan("paramdrift", True, f"{s['js']} JavaScript and TypeScript files", [[root]]))
+    else:
+        plans.append(Plan("paramdrift", False, "almost no JavaScript or TypeScript files"))
 
     if s["helm_tests"]:
         plans.append(Plan("assertdrift", True, f"{len(s['helm_tests'])} helm-unittest suites",  # type: ignore[arg-type]

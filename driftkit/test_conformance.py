@@ -31,7 +31,7 @@ import common  # noqa: E402
 DETECTORS = [
     "ifacedrift", "liftdrift", "transdrift", "gitdrift",
     "supportdrift", "namedrift", "deaddrift", "assertdrift", "linkdrift",
-    "docdrift", "doxdrift",
+    "docdrift", "doxdrift", "paramdrift",
 ]
 # Pipeline stages: they do not look for defects, they decide what to do with them.
 PIPELINE = ["sitecheck", "refute", "probe", "lessons", "buildprobe"]

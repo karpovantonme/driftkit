@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>19 tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
+  <strong>20 tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
   Python 3.9+, standard library only, nothing to install.<br>
   <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub>
 </p>
@@ -46,13 +46,14 @@ A real run, not an illustration. 11 of those 16 sit in `archive/`, which is why 
 
 ## The tools
 
-14 detectors. Each one is a species of defect we hit on a live project. None of them is a category invented at a desk.
+15 detectors. Each one is a species of defect we hit on a live project. None of them is a category invented at a desk.
 
 | Tool | What it compares |
 |---|---|
 | `docdrift` | numpydoc `Parameters` against the real Python signature |
 | `doxdrift` | Doxygen `\param` and `\tparam` against the real C++ declaration |
 | `swiftdrift` | a Swift `- Parameter` against the declaration under it, without building the package |
+| `paramdrift` | a JSDoc `@param` against the JavaScript or TypeScript signature under it |
 | `ifacedrift` | protobuf against OpenAPI, when a project maintains both by hand |
 | `liftdrift` | a vendored copy against the upstream commit that fixed it |
 | `transdrift` | a translated page against the original it was translated from |
