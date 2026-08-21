@@ -624,6 +624,12 @@ def print_report(report: Report, root: str, verbose: bool = False) -> None:
         print(f"{where}  {symbol}{f['why']}")
     if not report.findings:
         print("no documented name is missing from its declaration")
+    if verbose and report.unbound:
+        print()
+        print(f"--- Documented comments with no declaration under them "
+              f"({len(report.unbound)}) ---")
+        for where, line, tail in report.unbound:
+            print(f"  {where}:{line}  {tail}")
     print()
     print("=== Coverage ===")
     print(f"  tree:                   {root}")
@@ -645,12 +651,6 @@ def print_report(report: Report, root: str, verbose: bool = False) -> None:
           f"(a destructured argument has no name)")
     print(common.findings_line(len(report.findings), 0))
     print(stamp.line(__file__, ("common.py",)))
-    if verbose and report.unbound:
-        print()
-        print(f"--- Documented comments with no declaration under them "
-              f"({len(report.unbound)}) ---")
-        for where, line, tail in report.unbound:
-            print(f"  {where}:{line}  {tail}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

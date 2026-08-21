@@ -156,6 +156,42 @@ class TestSignature(unittest.TestCase):
     def test_empty_parameter_list(self):
         self.assertEqual(self.sig("function now() {"), ("now", []))
 
+    # The four below are regressions. Each one was a wrong answer on a live
+    # tree, not a case anybody thought of at a desk.
+
+    def test_overloads_in_an_interface_are_unioned(self):
+        """hono documents `HTMLRespond` once above two call signatures. Binding
+        to the first alone reports the second one's argument as drift."""
+        symbol, params = self.sig(
+            "interface HTMLRespond {\n"
+            "  <T extends string>(html: T, status?: number): Response\n"
+            "  <T extends string>(html: T, init?: ResponseOrInit): Response\n"
+            "}\n")
+        self.assertEqual(params, ["html", "status", "init"])
+
+    def test_overloads_of_a_function_are_unioned(self):
+        symbol, params = self.sig(
+            "export function on(a: string): void;\n"
+            "export function on(a: string, b: number): void;\n"
+            "export function on(a: any, b?: any) {\n")
+        self.assertEqual(params, ["a", "b"])
+
+    def test_a_one_argument_arrow_needs_no_parentheses(self):
+        """Lighthouse writes `/** @param {Event} e */ e => {` inline. Walking
+        past it binds the comment to the first call in the body."""
+        self.assertEqual(self.sig(" e => {\n  const el = document.q('x');"),
+                         ("", ["e"]))
+
+    def test_a_call_statement_is_not_a_declaration(self):
+        """A closing bracket followed by a semicolon has the shape of a
+        TypeScript overload and the meaning of a call."""
+        self.assertIsNone(self.sig("\ndocument.querySelector('div#lh-log');\n"))
+
+    def test_a_body_ends_the_reading(self):
+        """A function must not take the names of the functions inside it."""
+        self.assertEqual(self.sig("function outer(a) {\n  inner(b, c);\n}"),
+                         ("outer", ["a"]))
+
 
 class TestFindings(unittest.TestCase):
     def test_the_species(self):
