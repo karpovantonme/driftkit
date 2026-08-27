@@ -5,7 +5,8 @@
 <p align="center">
   <strong>20 tools that compare what a project <em>says</em> against what it <em>does</em>.</strong><br>
   Python 3.9+, standard library only, nothing to install.<br>
-  <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub>
+  <sub>by <a href="https://github.com/karpovantonme">Anton Karpov</a> · <a href="https://karpovanton.com">karpovanton.com</a></sub><br>
+  <sub>Two checks are being rewritten in Rust as a single binary: <a href="https://github.com/karpovantonme/driftkit-rust">driftkit-rust</a></sub>
 </p>
 
 <p align="center">
