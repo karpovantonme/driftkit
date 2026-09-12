@@ -105,6 +105,7 @@ class Finding:
 @dataclass
 class Report:
     files: int = 0
+    files_skipped: int = 0
     names: int = 0
     pairs_considered: int = 0
     too_short: int = 0
@@ -220,10 +221,12 @@ def collect(root: str, report: Report) -> Dict[str, Dict[str, Dict[str, List[int
             path = os.path.join(dirpath, n)
             try:
                 if os.path.getsize(path) > 4_000_000:
+                    report.files_skipped += 1
                     continue
                 with open(path, encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
             except OSError:
+                report.files_skipped += 1
                 continue
             report.files += 1
             rel = os.path.relpath(path, root)
@@ -342,6 +345,7 @@ def print_report(report: Report, verbose: bool = False) -> None:
 
     print("\n=== Coverage ===")
     print(f"  files read:             {report.files}")
+    print(f"  files skipped:          {report.files_skipped} (unreadable or over the size limit)")
     print(f"  names collected:        {report.names}")
     print(f"  names shorter than {MIN_LEN}: {report.too_short} (too many neighbours)")
     print(f"  pairs considered:       {report.pairs_considered}")

@@ -1,0 +1,1343 @@
+#!/usr/bin/env python3
+"""paramdrift.py: a documented parameter name against the signature under it,
+in the languages whose markup is a tag.
+
+WHY ONE MODULE AND NOT SIX. The species is already known: `docdrift` finds it
+in Python, `doxdrift` in C and C++, `swiftdrift` in Swift. What was not obvious
+until this week is how much of the remaining work is shared:
+
+    /** @param count how many */        JSDoc, JavaScript and TypeScript
+     * @param count how many            Javadoc, Java
+    /** @param int $count how many */   PHPDoc, PHP
+    # @param [Integer] count            YARD, Ruby
+    /// <param name="count">…</param>   XML doc, C#
+    /// * `count` - how many            rustdoc, under a `# Arguments` heading
+
+Four of those six are the same three characters, `@param`, followed by a name.
+The markup does not differ. **The signature underneath it does.** Six separate
+tools would have meant six copies of the flags, the report, the JSON contract
+and the tests, to hold six copies of one comparison. So the languages live in a
+registry here and each supplies two functions: read the names out of a comment,
+read the names out of a declaration.
+
+🔴 WHERE THE SPECIES ACTUALLY LIVES, measured rather than assumed. Two of these
+languages ship a guard of their own, and it works: Java has doclint, which
+reports `@param name not found`, and C# has warning CS1572, which says the same
+thing. Where the guard is on the trees are clean. Google gson has doclint set
+to `all,-missing` and 0 findings in 142 documented comments; Serilog and
+Google.Protobuf both set `GenerateDocumentationFile`, and both come back at 0.
+Keycloak sets `<doclint>none</doclint>` in its root pom and has 95. So for
+these two languages the search is not for a big project, it is for the line
+that switched the guard off.
+
+WHAT IS REPORTED, hard:
+
+  - **a documented name the declaration does not have.** The argument was
+    renamed, or removed, and the line above it stayed.
+
+DELIBERATELY NOT REPORTED:
+
+  - **an undocumented parameter.** Incompleteness, not drift, and in these
+    languages it is the normal state of most code;
+  - anything where the declaration could not be read with certainty. A
+    signature that is not understood produces no finding, and the report says
+    how many there were. See the next paragraph, it is the important one.
+
+🔴 THE COUNTER THAT HAD TO EXIST BEFORE THE FIRST LANGUAGE. A report reading
+`functions with Parameters: 14` on a tree of 1232 functions looks healthy, and
+that is exactly what a broken parser prints. It happened on keras, and the
+usual guard, "zero findings on a non-empty tree", does not catch it: fourteen
+is not zero. So every run here prints **how many documented comments were bound
+to a declaration out of how many were seen**, per language. A number that falls
+means the parser went blind, whatever the findings say.
+
+WHAT MAKES EACH LANGUAGE AWKWARD, since the traps are not shared even though
+the markup is:
+
+  - **Java lets a declaration have no body.** An interface method or an
+    abstract one ends at the closing bracket with a semicolon, sometimes after
+    a `throws` clause. In JavaScript that exact shape is a call statement, so
+    the two languages need opposite answers to the same question;
+  - **Java annotations sit between the comment and the declaration** and take
+    arguments of their own: `@SuppressWarnings({"a", "b"})` holds braces that
+    are not a body and a bracket that is not a parameter list;
+  - **the name is at the opposite end in Java and in Rust.** Java writes
+    `final Map<String, T> mapping`, where the name is the last token and
+    everything before it is the type. Rust writes `mapping: &Map<String, T>`,
+    where the name is the first. Neither rule can be shared;
+  - **an apostrophe is a lifetime in Rust, not a quote.** A string blanker
+    told otherwise erases everything between two of them, which on qdrant
+    turned a 7 argument signature into a 1 argument one and manufactured 6
+    findings that were not there;
+  - **the sigil does the work in PHP.** A parameter is `$name` in the comment
+    and in the signature alike, so a type as involved as
+    `array<string, list<int>>` never needs reading;
+  - **YARD accepts the name on either side of the type**, `@param name [Type]`
+    and `@param [Type] name`, and real code holds both. The rule is neither of
+    them: the name is the first token that is not in square brackets;
+  - **a PHP function can take arguments without declaring any**, by reading
+    `func_get_args()` out of its body, and documenting them is the right thing
+    to do rather than drift;
+  - **JSDoc puts the type before the name**, `@param {string} name`, the
+    opposite way round from Doxygen, and the braces nest: `{Array<{x: number}>}`
+    cannot be matched with one regular expression;
+  - **a JSDoc name can be optional or defaulted**, `[name]` and `[name=1]`, and
+    **a name can be a path**, `opts.retries`. The path documents a field of an
+    argument, not an argument, so only the root is compared. Comparing the whole
+    path would manufacture a finding on every well-documented options object;
+  - **a destructured parameter has no name at all**, `function f({a, b})`. There
+    is nothing to compare against, so such a declaration is skipped and counted
+    rather than guessed at;
+  - `@typedef` and `@callback` blocks carry `@param` lines describing **a type,
+    not the function below them**. Binding those to the next declaration would
+    be a false finding every time.
+
+KNOWN BLIND SPOTS, named rather than hidden:
+
+  - **minified files.** A committed `.min.js` is not in any skip list and has
+    no comments worth reading; a file whose longest line runs past 5000
+    characters is skipped and counted;
+  - **overloads are unioned rather than told apart.** One comment above an
+    interface holding two call signatures documents both, so the names of both
+    are accepted. A name that belongs to the second overload and is written as
+    if it belonged to the first goes unreported. That is the deliberate
+    direction: the first run of this check against hono reported exactly such
+    a name, and it was not a defect;
+  - **an explicit interface implementation in C#**, `void ICollection<T>.CopyTo(…)`,
+    has the same shape as a method call and is left unbound rather than
+    guessed at;
+  - **generated code** is invisible here as it is to every other check in the
+    kit;
+  - **`@param <T>` in Java** documents a type parameter, and binding one needs
+    the type parameters of the enclosing class as well as of the method: a
+    method inside `class Box<T>` documents `<T>` without declaring it. Reading
+    only the method would call every such line a defect, so they are skipped;
+  - a doc comment separated from its declaration by a statement is left
+    unbound on purpose: a file header followed by imports must not bind to the
+    first function in the file.
+"""
+from __future__ import annotations
+
+import argparse
+import bisect
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass, field as dc_field
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import common  # noqa: E402
+import stamp  # noqa: E402
+
+TOOL = "paramdrift"
+
+# How far below a doc comment a declaration may start. Long enough for a
+# decorated method, short enough that a file header does not reach the first
+# function in the file.
+WINDOW = 900
+
+# A line longer than this means the file is minified. Nothing in it is worth
+# reading and the parenthesis matcher would walk the whole line.
+MAX_LINE = 5000
+
+# A parameter that cannot be named: `function f({a, b})`. Not a failure to
+# parse, a declaration with nothing to compare against.
+OPAQUE = "\0opaque"
+
+
+# --------------------------------------------------------------------------
+# Shared pieces
+# --------------------------------------------------------------------------
+
+@dataclass
+class Block:
+    """A documentation comment and where it sits."""
+    text: str      # the comment body, decoration blanked, offsets preserved
+    line: int      # 1-based line of the opening of the comment
+    body: int      # character offset in the source at which `text` begins
+    end: int       # character offset just past the closing of the comment
+
+
+def line_index(src: str) -> List[int]:
+    """Offsets at which each line starts, for turning a position into a line."""
+    starts = [0]
+    for m in re.finditer("\n", src):
+        starts.append(m.end())
+    return starts
+
+
+def line_at(starts: List[int], pos: int) -> int:
+    return bisect.bisect_right(starts, pos)
+
+
+def skip_blank(text: str, i: int) -> int:
+    """Past spaces and tabs. Newlines are not crossed on purpose: a tag with
+    nothing after it on its line must not swallow the next line."""
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    return i
+
+
+def match_pair(text: str, i: int, opener: str = "(", closer: str = ")") -> int:
+    """Index of the bracket closing the one at `i`, or -1."""
+    if i >= len(text) or text[i] != opener:
+        return -1
+    depth = 0
+    for j in range(i, len(text)):
+        c = text[j]
+        if c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+# --------------------------------------------------------------------------
+# JavaScript and TypeScript
+# --------------------------------------------------------------------------
+
+# `/**` opens a doc comment; `/**/` is an empty ordinary one and is not.
+JS_DOC = re.compile(r"/\*\*(?!/)(.*?)\*/", re.S)
+
+# The decoration down the left margin. Replaced by a space rather than
+# removed, so every offset inside the block stays where it was and a finding
+# can be reported on the line it is actually on.
+JS_MARGIN = re.compile(r"^([ \t]*)\*([ \t]?)", re.M)
+
+# A block describing a type rather than the declaration below it.
+JS_NOT_A_FUNCTION = re.compile(r"@(?:typedef|callback|external|enum)\b")
+
+JS_TAG = re.compile(r"(?<![\w$@])@(?:param|arg|argument)\b")
+
+IDENT = re.compile(r"[A-Za-z_$][\w$]*")
+
+# Keywords that take a parenthesis and are not declarations.
+JS_STOP = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "typeof", "await",
+    "new", "delete", "void", "in", "of", "do", "else", "case", "yield",
+    "instanceof", "import", "require", "throw", "with", "super",
+})
+
+JS_MODIFIER = re.compile(
+    r"^(?:public|private|protected|readonly|override|abstract|static)\s+")
+JS_DECORATOR = re.compile(r"^@[\w$.]+(?:\([^)]*\))?\s*")
+
+
+def js_blocks(src: str) -> Iterator[Block]:
+    starts = line_index(src)
+    for m in JS_DOC.finditer(src):
+        body = JS_MARGIN.sub(r"\1 \2", m.group(1))
+        yield Block(body, line_at(starts, m.start()), m.start(1), m.end())
+
+
+def js_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    """Documented names and their offsets inside the block.
+
+    `None` means the block describes a type and must not be bound to anything.
+    """
+    if JS_NOT_A_FUNCTION.search(text):
+        return None
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in JS_TAG.finditer(text):
+        i = skip_blank(text, m.end())
+        if i < len(text) and text[i] == "{":
+            j = match_pair(text, i, "{", "}")
+            if j < 0:
+                continue
+            i = skip_blank(text, j + 1)
+        name = _js_doc_name(text, i)
+        if name and name not in seen:
+            seen.add(name)
+            out.append((name, m.start()))
+    return out
+
+
+def _js_doc_name(text: str, i: int) -> Optional[str]:
+    if i >= len(text) or text[i] == "\n":
+        return None
+    if text[i] == "[":
+        j = match_pair(text, i, "[", "]")
+        if j < 0:
+            return None
+        raw = text[i + 1:j].split("=", 1)[0]
+    else:
+        m = re.match(r"\S+", text[i:])
+        if not m:
+            return None
+        raw = m.group(0).rstrip(",;:")
+    raw = raw.strip()
+    if raw.startswith("..."):
+        raw = raw[3:]
+    # `opts.retries` documents a field of an argument, not an argument.
+    raw = raw.split(".", 1)[0].strip()
+    return raw if re.fullmatch(r"[A-Za-z_$][\w$]*", raw) else None
+
+
+def c_blank(src: str, quotes: str = "'\"`") -> str:
+    """Blank out strings and comments, keeping every offset and newline.
+
+    Shared by every language here whose comments are C shaped. `quotes` says
+    which characters open a string: JavaScript has three, Java has two, and
+    handing Java a backtick would send the scanner off looking for a closing
+    one that never comes.
+
+    A JavaScript template literal is blanked whole, `${…}` included. Code
+    inside one is never a declaration we are looking for, and keeping the
+    braces would only confuse the bracket matcher.
+    """
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":
+                out[i] = " "
+                i += 1
+        elif c == "/" and i + 1 < n and src[i + 1] == "*":
+            out[i] = out[i + 1] = " "
+            i += 2
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                if src[i] != "\n":
+                    out[i] = " "
+                i += 1
+            if i < n:
+                out[i] = " "
+                out[min(i + 1, n - 1)] = " "
+                i += 2
+        elif c in quotes:
+            quote = c
+            out[i] = " "
+            i += 1
+            while i < n:
+                if src[i] == "\\":
+                    if src[i] != "\n":
+                        out[i] = " "
+                    if i + 1 < n and src[i + 1] != "\n":
+                        out[i + 1] = " "
+                    i += 2
+                    continue
+                if src[i] == quote:
+                    out[i] = " "
+                    i += 1
+                    break
+                if src[i] != "\n":
+                    out[i] = " "
+                i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _ident_start(text: str, i: int) -> Optional[int]:
+    """Where the identifier ending just before `i` begins, or None."""
+    j = i - 1
+    while j >= 0 and text[j] in " \t\n\r":
+        j -= 1
+    if j < 0 or not (text[j].isalnum() or text[j] in "_$"):
+        return None
+    while j >= 0 and (text[j].isalnum() or text[j] in "_$"):
+        j -= 1
+    return j + 1 if IDENT.match(text[j + 1:]) else None
+
+
+def js_blank(src: str) -> str:
+    return c_blank(src, "'\"`")
+
+
+def _name_and_before(blank: str, i: int) -> Tuple[str, str]:
+    """The declared name just before position `i`, and the token before that.
+
+    🔴 The second half is what tells a declaration from a call, and it is the
+    same trap that bound a Lighthouse comment to `document.querySelector`. In
+    WP-CLI a docblock sits above `return WP_CLI::do_hook('x', $all_formats);`
+    documenting the hook's own arguments, and a scanner that accepts any
+    bracket followed by a semicolon reads that call as a method declaration.
+    A semicolon cannot be dropped as a signal, because an interface method in
+    PHP and C# really does end that way. What differs is the word in front.
+    """
+    head = blank[:i].rstrip()
+    if head.endswith(">"):
+        depth, j = 0, len(head) - 1
+        while j >= 0:
+            if head[j] == ">" and (j == 0 or head[j - 1] != "="):
+                depth += 1
+            elif head[j] == "<":
+                depth -= 1
+                if depth == 0:
+                    break
+            j -= 1
+        head = head[:max(j, 0)].rstrip()
+    m = re.search(r"([A-Za-z_$][\w$]*)$", head)
+    if not m:
+        return "", ""
+    return m.group(1), _prev_token(head, m.start(1))
+
+
+def _prev_token(text: str, i: int) -> str:
+    """The word or symbol immediately before position `i`."""
+    j = i - 1
+    while j >= 0 and text[j] in " \t\n\r":
+        j -= 1
+    if j < 0:
+        return ""
+    if text[j].isalnum() or text[j] in "_$":
+        k = j
+        while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+            k -= 1
+        return text[k + 1:j + 1]
+    return text[j]
+
+
+def js_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    """The declared name and its parameter names, or `None` if not bound.
+
+    🔴 OVERLOADS ARE UNIONED, and the first real finding this check produced
+    was the reason. Hono documents `HTMLRespond` once above an interface that
+    holds two call signatures; the first takes three arguments, the second
+    takes `init`. Binding to the first alone reports `init` as drift, and it
+    is not drift, it is the second signature. So a declaration in **type
+    position** (its parameter list is followed by `:` or `;` rather than a
+    body) continues to be read: every call signature at the same brace depth
+    contributes its names, and the set closes when the depth drops.
+
+    A declaration with a body ends the reading immediately. Otherwise a
+    function would take the names of every function nested inside it.
+    """
+    cut = window.find("/**")
+    if cut >= 0:
+        window = window[:cut]
+    blank = js_blank(window)
+    bound = False
+    symbol, names = "", []
+    depth, first_depth, angle, prev_char = 0, 0, 0, ""
+    i, n = 0, len(blank)
+    while i < n:
+        c = blank[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            # A statement that closes before any signature means the comment
+            # and the code below it are not related.
+            if not bound:
+                return None
+            if depth < first_depth:
+                break
+        elif c == ";":
+            if not bound:
+                return None
+        elif c == "<":
+            angle += 1
+        elif c == ">":
+            # `=>` is an arrow, not a closing angle bracket.
+            if prev_char != "=":
+                angle = max(0, angle - 1)
+            elif not bound and angle == 0:
+                # 🔴 An arrow function with one argument needs no parentheses:
+                # `e => {`. Lighthouse writes `/** @param {Event} e */ e => {`
+                # inline, and a scanner looking only for a parameter list walks
+                # straight past it into the first call in the body and reports
+                # the argument as missing. It was the check's first false
+                # positive on a live tree.
+                start = _ident_start(blank, i - 1)
+                if start is not None:
+                    name = IDENT.match(blank[start:]).group(0)
+                    if name not in JS_STOP:
+                        return _js_symbol(blank[:start]), [name]
+        elif c == "(" and angle == 0:
+            prev = _prev_token(blank, i)
+            close = match_pair(blank, i)
+            if prev in JS_STOP or close < 0:
+                if not bound:
+                    return None
+                break
+            after = blank[close + 1:].lstrip()
+            is_body = after[:2] == "=>" or after[:1] == "{"
+            # A return type, `function f(a: string): void`. A closing bracket
+            # followed straight by a semicolon is a call statement, not a
+            # declaration, and reading it as one bound a Lighthouse comment to
+            # `document.querySelector(...)`.
+            is_type = after[:1] == ":"
+            if not (is_body or is_type):
+                if not bound:
+                    return None
+                i, prev_char = close + 1, ")"
+                continue
+            got = _js_params(blank[i + 1:close])
+            if not bound:
+                bound, first_depth = True, depth
+                symbol, names = _js_symbol(blank[:i]), list(got)
+                if is_body:
+                    return symbol, names
+            elif depth == first_depth:
+                names.extend(g for g in got if g not in names)
+            i, prev_char = close + 1, ")"
+            continue
+        prev_char = c
+        i += 1
+    return (symbol, names) if bound else None
+
+
+# Words that may sit immediately before a parameter list without being the
+# name of the thing being declared.
+JS_TAIL_WORDS = re.compile(
+    r"(?:\b(?:function|async|export|default|static|new|await|return|get|set)"
+    r"\b\s*\*?\s*)+$")
+
+
+def _js_symbol(head: str) -> str:
+    """The name of the thing being declared, for the report. Cosmetic: a wrong
+    answer here mislabels a finding, it does not create one."""
+    head = head.rstrip()
+    if head.endswith(">"):
+        depth, j = 0, len(head) - 1
+        while j >= 0:
+            if head[j] == ">" and (j == 0 or head[j - 1] != "="):
+                depth += 1
+            elif head[j] == "<":
+                depth -= 1
+                if depth == 0:
+                    break
+            j -= 1
+        head = head[:max(j, 0)].rstrip()
+    head = JS_TAIL_WORDS.sub("", head).rstrip()
+    m = re.search(r"([A-Za-z_$][\w$]*)$", head)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b[^=]*=\s*$", head)
+    if m:
+        return m.group(1)
+    m = re.search(r"([A-Za-z_$][\w$]*)\s*[:=]\s*$", head)
+    return m.group(1) if m else ""
+
+
+def _js_params(inner: str) -> List[str]:
+    out = []
+    for part in _split_top(inner):
+        name = _js_param_name(part)
+        if name is not None:
+            out.append(name)
+    return out
+
+
+def _split_top(inner: str) -> List[str]:
+    """Split on commas that are not inside brackets.
+
+    Angle brackets count, because `a: Map<string, number>` holds a comma that
+    is not a separator. `=>` is not a closing angle bracket: a default value
+    may be an arrow function.
+    """
+    parts, cur, depth, angle = [], [], 0, 0
+    prev = ""
+    for c in inner:
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "<":
+            angle += 1
+        elif c == ">" and prev != "=":
+            angle = max(0, angle - 1)
+        if c == "," and depth == 0 and angle == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        prev = c
+    if "".join(cur).strip():
+        parts.append("".join(cur))
+    return parts
+
+
+def _js_param_name(part: str) -> Optional[str]:
+    p = part.strip()
+    while True:
+        stripped = JS_DECORATOR.sub("", p)
+        stripped = JS_MODIFIER.sub("", stripped)
+        if stripped == p:
+            break
+        p = stripped.lstrip()
+    if p.startswith("..."):
+        p = p[3:].lstrip()
+    if not p:
+        return None
+    if p[0] in "{[":
+        return OPAQUE
+    m = IDENT.match(p)
+    if not m:
+        return OPAQUE
+    name = m.group(0)
+    # TypeScript lets a method declare the type of `this`. It is not an
+    # argument and nobody documents it.
+    if name == "this":
+        return None
+    return name
+
+
+
+# --------------------------------------------------------------------------
+# Java
+# --------------------------------------------------------------------------
+#
+# The markup is the same three characters, `@param name description`, and the
+# comment is the same `/** */`. Everything below is about the declaration.
+
+JAVA_TAG = re.compile(r"(?<![\w$@])@param\b")
+
+JAVA_TYPE_PARAM = re.compile(r"<\s*([A-Za-z_$][\w$]*)\s*>")
+
+JAVA_STOP = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "new", "synchronized",
+    "assert", "throw", "do", "else", "super", "this", "case", "instanceof",
+})
+
+JAVA_ANNOTATION = re.compile(r"@\s*[\w$.]+\s*")
+JAVA_ANNOTATION_IN_PARAM = re.compile(r"@[\w$.]+(?:\([^)]*\))?")
+
+
+def java_blocks(src: str) -> Iterator[Block]:
+    return js_blocks(src)
+
+
+def java_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    """Documented names and their offsets.
+
+    🔴 `@param <T>` documents a TYPE parameter, and this version does not
+    report those. Binding one needs the type parameters of the enclosing class
+    as well as of the method, since a method inside `class Box<T>` documents
+    `<T>` without declaring it. Reading only the method would call every such
+    line a defect. Counted, not judged.
+    """
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in JAVA_TAG.finditer(text):
+        i = skip_blank(text, m.end())
+        if i >= len(text) or text[i] == "\n":
+            continue
+        if JAVA_TYPE_PARAM.match(text[i:]):
+            continue
+        name = IDENT.match(text[i:])
+        if name and name.group(0) not in seen:
+            seen.add(name.group(0))
+            out.append((name.group(0), m.start()))
+    return out
+
+
+def java_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    """The declared name and its parameter names, or `None` if not bound.
+
+    Three things Java does that JavaScript does not:
+
+      - **annotations sit between the comment and the declaration**, and they
+        take arguments: `@SuppressWarnings({"a", "b"})`. Those braces are not
+        a body and that parenthesis is not a parameter list, so an annotation
+        is stepped over whole;
+      - **a declaration may have no body.** An interface method and an
+        abstract method end at `)` with a semicolon, sometimes after a
+        `throws` clause. In JavaScript that shape is a call statement;
+      - **overloads carry their own comment each**, so nothing is unioned
+        here. The reading stops at the first declaration.
+    """
+    cut = window.find("/**")
+    if cut >= 0:
+        window = window[:cut]
+    blank = c_blank(window, "'\"")
+    i, n, angle, prev_char = 0, len(blank), 0, ""
+    while i < n:
+        c = blank[i]
+        if c == "@":
+            m = JAVA_ANNOTATION.match(blank, i)
+            if m:
+                i = m.end()
+                if i < n and blank[i] == "(":
+                    close = match_pair(blank, i)
+                    if close < 0:
+                        return None
+                    i = close + 1
+                prev_char = ")"
+                continue
+        if c in ";}":
+            return None
+        if c == "<":
+            angle += 1
+        elif c == ">":
+            # `->` is a lambda and `>>` a shift, neither closes a type.
+            if prev_char not in ("-", "="):
+                angle = max(0, angle - 1)
+        elif c == "(" and angle == 0:
+            prev = _prev_token(blank, i)
+            if prev in JAVA_STOP or not IDENT.fullmatch(prev):
+                return None
+            close = match_pair(blank, i)
+            if close < 0:
+                return None
+            after = blank[close + 1:].lstrip()
+            if (after[:1] in ("{", ";")
+                    or after.startswith("throws")
+                    or after.startswith("default")):
+                return prev, _java_params(blank[i + 1:close])
+            return None
+        prev_char = c
+        i += 1
+    return None
+
+
+def _java_params(inner: str) -> List[str]:
+    out = []
+    for part in _split_top(inner):
+        name = _java_param_name(part)
+        if name:
+            out.append(name)
+    return out
+
+
+def _java_param_name(part: str) -> Optional[str]:
+    """The name is the last token. Everything before it is the type.
+
+    That is the whole rule, and it survives generics with commas inside them
+    because the splitting already happened at the right depth.
+    """
+    p = JAVA_ANNOTATION_IN_PARAM.sub(" ", part)
+    p = p.replace("...", " ")
+    p = re.sub(r"\[\s*\]", " ", p)   # `String[] a` and `String a[]` both
+    tokens = p.split()
+    if not tokens:
+        return None
+    return tokens[-1] if IDENT.fullmatch(tokens[-1]) else None
+
+
+# --------------------------------------------------------------------------
+# C#
+# --------------------------------------------------------------------------
+#
+# The one dialect here whose markup is XML rather than a tag, and the easiest
+# of the six for exactly that reason: `<param name="x">` says the name in a
+# quoted attribute, so there is nothing to parse out of prose.
+
+CS_DOC_LINE = re.compile(r"(?:^[ \t]*///[^\n]*\n)+", re.M)
+CS_LEAD = re.compile(r"^([ \t]*)///", re.M)
+CS_PARAM = re.compile(r"<param\s+name\s*=\s*[\"'](?P<name>[^\"']+)[\"']")
+CS_TYPEPARAM = re.compile(r"<typeparam\s")
+CS_INHERIT = re.compile(r"<inheritdoc\b")
+
+CS_STOP = frozenset({
+    "if", "for", "foreach", "while", "switch", "catch", "return", "new",
+    "lock", "using", "throw", "else", "do", "case", "when", "await", "is",
+    "as", "nameof", "typeof", "sizeof", "checked", "unchecked", "base", "this",
+})
+
+CS_ATTRIBUTE = re.compile(r"\[[^\]]*\]\s*")
+# `public static bool operator ==(A lhs, A rhs)` has no identifier in front of
+# the bracket, and `implicit operator string(A a)` has one that is a type.
+CS_OPERATOR = re.compile(r"\boperator\s*(?P<op>[^\s(]{1,2})\s*$")
+CS_MODIFIER = re.compile(r"^(?:out|ref|in|params|this|scoped|readonly)\s+")
+
+
+def cs_blocks(src: str) -> Iterator[Block]:
+    """A run of `///` lines is one comment. The marker is blanked in place so
+    every offset inside the block stays where it was."""
+    starts = line_index(src)
+    for m in CS_DOC_LINE.finditer(src):
+        body = CS_LEAD.sub(r"\1   ", m.group(0))
+        yield Block(body, line_at(starts, m.start()), m.start(), m.end())
+
+
+def cs_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    if CS_INHERIT.search(text):
+        # The documentation lives on the member this one inherits from, and
+        # comparing it against this signature would be comparing two things.
+        return None
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in CS_PARAM.finditer(text):
+        name = m.group("name").strip()
+        if IDENT.fullmatch(name) and name not in seen:
+            seen.add(name)
+            out.append((name, m.start()))
+    return out
+
+
+# C# preprocessor directives sit between a comment and the declaration it
+# belongs to, and Serilog uses them heavily: 78 of its 372 documented comments
+# were left unbound by them alone. Blanked line by line, length preserved.
+CS_DIRECTIVE = re.compile(r"^[ \t]*#[A-Za-z]+[^\n]*", re.M)
+
+
+def cs_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    """C# puts attributes in square brackets before the declaration, and a
+    member may have no body at all: an interface method, an abstract one, or
+    one written as an expression with `=>`."""
+    cut = window.find("///")
+    if cut >= 0:
+        window = window[:cut]
+    blank = CS_DIRECTIVE.sub(lambda m: " " * len(m.group(0)),
+                             c_blank(window, "'\""))
+    i, n, angle, prev_char = 0, len(blank), 0, ""
+    while i < n:
+        c = blank[i]
+        if c == "[":
+            m = CS_ATTRIBUTE.match(blank, i)
+            if m:
+                i = m.end()
+                prev_char = "]"
+                continue
+        if c in ";}":
+            return None
+        if c == "<":
+            angle += 1
+        elif c == ">":
+            if prev_char not in ("=", "-"):
+                angle = max(0, angle - 1)
+        elif c == "(" and angle == 0:
+            # C# writes the type parameters after the name, `Get<T>(`, so the
+            # token before the bracket is the closing angle rather than the
+            # name. Java puts them before the return type and does not have
+            # this shape.
+            prev, before = _name_and_before(blank, i)
+            op = CS_OPERATOR.search(blank[:i])
+            if op:
+                prev, before = "operator " + op.group("op"), "operator"
+            elif not prev or prev in CS_STOP:
+                return None
+            # A declaration carries a return type or a modifier in front of
+            # the name. A call carries `=`, `.`, `return` or nothing.
+            elif before in CS_STOP or not (IDENT.fullmatch(before)
+                                           or before in (">", "]", "?")):
+                return None
+            close = match_pair(blank, i)
+            if close < 0:
+                return None
+            after = blank[close + 1:].lstrip()
+            # `: this(...)` and `: base(...)` chain a constructor to another
+            # one, so a colon after the bracket is still a declaration.
+            if (after[:1] in ("{", ";", ":") or after[:2] == "=>"
+                    or after.startswith("where")):
+                return prev, _cs_params(blank[i + 1:close])
+            return None
+        prev_char = c
+        i += 1
+    return None
+
+
+def _cs_params(inner: str) -> List[str]:
+    out = []
+    for part in _split_top(inner):
+        name = _cs_param_name(part)
+        if name:
+            out.append(name)
+    return out
+
+
+def _cs_param_name(part: str) -> Optional[str]:
+    p = CS_ATTRIBUTE.sub(" ", part).strip()
+    # A default value can hold anything, including its own brackets. The name
+    # sits before it.
+    p = p.split("=", 1)[0]
+    while True:
+        stripped = CS_MODIFIER.sub("", p).lstrip()
+        if stripped == p:
+            break
+        p = stripped
+    tokens = p.replace("?", " ").split()
+    if not tokens:
+        return None
+    return tokens[-1] if IDENT.fullmatch(tokens[-1]) else None
+
+
+# --------------------------------------------------------------------------
+# PHP
+# --------------------------------------------------------------------------
+#
+# The sigil does the work. A PHP parameter is always `$name`, in the comment
+# and in the signature alike, so the type in front of it can be as involved as
+# it likes and never needs reading: `@param array<string, list<int>> $rows`.
+
+PHP_TAG = re.compile(r"(?<![\w$@])@param\b")
+PHP_VAR = re.compile(r"\$([A-Za-z_]\w*)")
+
+# 🔴 A PHP function may take its arguments without declaring any of them, by
+# reading `func_get_args()` out of the body. php-curl-class does exactly that
+# in 6 places and documents the arguments it expects, which is the useful
+# thing to do and the opposite of drift. An empty parameter list next to that
+# call means there is nothing to compare, not that the comment is wrong.
+PHP_VARIADIC_BODY = re.compile(r"\bfunc_get_args\s*\(")
+
+PHP_STOP = frozenset({
+    "if", "elseif", "for", "foreach", "while", "switch", "catch", "return",
+    "new", "echo", "print", "isset", "unset", "empty", "list", "array",
+    "match", "throw", "clone", "yield", "require", "include", "exit", "die",
+})
+
+
+def php_blocks(src: str) -> Iterator[Block]:
+    return js_blocks(src)
+
+
+def php_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    """The name is the first `$token` after the tag, whatever the type says."""
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in JS_TAG.finditer(text) if False else PHP_TAG.finditer(text):
+        line_end = text.find("\n", m.end())
+        line = text[m.end():line_end if line_end >= 0 else len(text)]
+        var = PHP_VAR.search(line)
+        if var and var.group(1) not in seen:
+            seen.add(var.group(1))
+            out.append((var.group(1), m.start()))
+    return out
+
+
+def php_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    cut = window.find("/**")
+    if cut >= 0:
+        window = window[:cut]
+    blank = c_blank(window, "'\"")
+    i, n, angle, prev_char = 0, len(blank), 0, ""
+    while i < n:
+        c = blank[i]
+        if c == "#" and blank[i:i + 2] == "#[":
+            # An attribute, PHP 8. Skipped whole, brackets and all.
+            close = match_pair(blank, i + 1, "[", "]")
+            if close < 0:
+                return None
+            i = close + 1
+            prev_char = "]"
+            continue
+        if c in ";}":
+            return None
+        if c == "<":
+            angle += 1
+        elif c == ">":
+            if prev_char not in ("=", "-"):
+                angle = max(0, angle - 1)
+        elif c == "(" and angle == 0:
+            prev, before = _name_and_before(blank, i)
+            # PHP spells out `function` on every declaration, named or not,
+            # so anything else in front of the bracket is a call.
+            if before != "function" and prev != "function" and prev != "fn":
+                return None
+            if prev in PHP_STOP:
+                return None
+            close = match_pair(blank, i)
+            if close < 0:
+                return None
+            after = blank[close + 1:].lstrip()
+            if after[:1] in ("{", ";") or after[:1] == ":":
+                names, seen = [], set()
+                for var in PHP_VAR.finditer(blank[i + 1:close]):
+                    if var.group(1) not in seen:
+                        seen.add(var.group(1))
+                        names.append(var.group(1))
+                symbol = prev if IDENT.fullmatch(prev) and prev != "function" else ""
+                if not names and PHP_VARIADIC_BODY.search(blank[close:close + 600]):
+                    return symbol, [OPAQUE]
+                return symbol, names
+            return None
+        prev_char = c
+        i += 1
+    return None
+
+
+# --------------------------------------------------------------------------
+# Ruby
+# --------------------------------------------------------------------------
+#
+# 🔴 YARD accepts the name on either side of the type, `@param name [Type]`
+# and `@param [Type] name`, and both are written in real code. Choosing one
+# would report the other as a defect on every line. So the rule is neither:
+# **the name is the first token that is not in square brackets.**
+
+RB_DOC_LINE = re.compile(r"(?:^[ \t]*#[^\n]*\n)+", re.M)
+RB_LEAD = re.compile(r"^([ \t]*)#", re.M)
+RB_TAG = re.compile(r"(?<![\w@])@param\b")
+RB_DEF = re.compile(
+    r"^[ \t]*(?:(?:private|protected|public|module_function)\s+)?"
+    r"def\s+(?:self\.)?(?P<name>[^\s(#]+)(?P<rest>.*)$", re.M)
+
+
+def rb_blocks(src: str) -> Iterator[Block]:
+    starts = line_index(src)
+    for m in RB_DOC_LINE.finditer(src):
+        body = RB_LEAD.sub(r"\1 ", m.group(0))
+        yield Block(body, line_at(starts, m.start()), m.start(), m.end())
+
+
+def rb_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in RB_TAG.finditer(text):
+        line_end = text.find("\n", m.end())
+        rest = text[m.end():line_end if line_end >= 0 else len(text)]
+        name = _rb_doc_name(rest)
+        if name and name not in seen:
+            seen.add(name)
+            out.append((name, m.start()))
+    return out
+
+
+def _rb_doc_name(rest: str) -> Optional[str]:
+    i = skip_blank(rest, 0)
+    while i < len(rest) and rest[i] == "[":
+        close = match_pair(rest, i, "[", "]")
+        if close < 0:
+            return None
+        i = skip_blank(rest, close + 1)
+    m = IDENT.match(rest[i:])
+    return m.group(0) if m else None
+
+
+def rb_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    """Ruby needs no bracket walking: the declaration is one line beginning
+    with `def`, and the parentheses around the parameters are optional."""
+    for line in window.split("\n"):
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        m = RB_DEF.match(line)
+        if not m:
+            return None
+        rest = m.group("rest").strip()
+        if rest.startswith("("):
+            close = match_pair(rest, 0, "(", ")")
+            inner = rest[1:close] if close > 0 else rest[1:]
+        else:
+            inner = rest.split("#", 1)[0]
+        return m.group("name"), _rb_params(inner)
+    return None
+
+
+def _rb_params(inner: str) -> List[str]:
+    out = []
+    for part in _split_top(inner):
+        p = part.strip().lstrip("*&")
+        p = p.split("=", 1)[0].split(":", 1)[0].strip()
+        if not p:
+            continue
+        if p[0] in "([":
+            out.append(OPAQUE)
+            continue
+        m = IDENT.match(p)
+        out.append(m.group(0) if m else OPAQUE)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Rust
+# --------------------------------------------------------------------------
+#
+# No tag at all. rustdoc has no `@param`, so the convention is a markdown
+# section, `# Arguments`, holding a bullet per argument with the name in
+# backticks. Only the backticked token is read: the prose around it varies
+# from crate to crate and carries no rule.
+#
+# 🔴 And the name is BEFORE the colon here, `a: &str`, the opposite of Java
+# where it is the last token. Two languages, two ends of the same shape.
+
+RS_DOC_LINE = re.compile(r"(?:^[ \t]*///[^\n]*\n)+", re.M)
+RS_LEAD = re.compile(r"^([ \t]*)///", re.M)
+RS_ARGS_HEAD = re.compile(r"^\s*#+\s*(?:Arguments?|Parameters?|Args)\s*$", re.M)
+RS_HEAD = re.compile(r"^\s*#+\s+\S", re.M)
+RS_BULLET = re.compile(r"^\s*[*\-+]\s*`(?P<name>[A-Za-z_]\w*)`", re.M)
+
+RS_FN = re.compile(r"\bfn\s+(?P<name>[A-Za-z_]\w*)")
+RS_ATTRIBUTE = re.compile(r"#!?\[[^\]]*\]\s*")
+
+
+def rs_blocks(src: str) -> Iterator[Block]:
+    starts = line_index(src)
+    for m in RS_DOC_LINE.finditer(src):
+        body = RS_LEAD.sub(r"\1   ", m.group(0))
+        yield Block(body, line_at(starts, m.start()), m.start(), m.end())
+
+
+def rs_doc_params(text: str) -> Optional[List[Tuple[str, int]]]:
+    """Only what sits under an `# Arguments` heading, and only in backticks.
+
+    The section ends at the next heading. A crate that writes argument names
+    into the prose of its summary is not read, on purpose: prose mentions an
+    argument as often as it documents one.
+    """
+    head = RS_ARGS_HEAD.search(text)
+    if not head:
+        return []
+    end = len(text)
+    nxt = RS_HEAD.search(text, head.end())
+    if nxt:
+        end = nxt.start()
+    out: List[Tuple[str, int]] = []
+    seen = set()
+    for m in RS_BULLET.finditer(text, head.end(), end):
+        name = m.group("name")
+        if name not in seen:
+            seen.add(name)
+            out.append((name, m.start()))
+    return out
+
+
+def rs_signature(window: str) -> Optional[Tuple[str, List[str]]]:
+    cut = window.find("///")
+    if cut >= 0:
+        window = window[:cut]
+    # 🔴 The apostrophe is NOT a quote in Rust. `fn f<'a>(data: impl Iterator +
+    # 'a, rows: &[u8])` holds two lifetimes, and a blanker told to treat `'` as
+    # a string opener erases everything between them. On qdrant that turned a
+    # 7 argument signature into a 1 argument one and produced 6 findings that
+    # were not there. Only the double quote opens a string here.
+    blank = c_blank(window, '"')
+    # Attributes and their brackets come off first: `#[inline]`, `#[cfg(...)]`.
+    while True:
+        m = RS_ATTRIBUTE.match(blank.lstrip())
+        if not m:
+            break
+        blank = blank.lstrip()[m.end():]
+    fn = RS_FN.search(blank)
+    if not fn:
+        return None
+    # A `fn` further down than the first statement is somebody else's.
+    if ";" in blank[:fn.start()] or "}" in blank[:fn.start()]:
+        return None
+    i = blank.find("(", fn.end())
+    if i < 0:
+        return None
+    close = match_pair(blank, i)
+    if close < 0:
+        return None
+    return fn.group("name"), _rs_params(blank[i + 1:close])
+
+
+def _rs_params(inner: str) -> List[str]:
+    out = []
+    for part in _split_top(inner):
+        p = part.strip()
+        if not p:
+            continue
+        # `self`, `&self`, `&mut self` are the receiver, and nobody documents
+        # them as arguments.
+        if re.fullmatch(r"(?:&\s*)?(?:'\w+\s+)?(?:mut\s+)?self", p):
+            continue
+        p = re.sub(r"^mut\s+", "", p)
+        if p[0] in "([":
+            out.append(OPAQUE)
+            continue
+        name = p.split(":", 1)[0].strip()
+        m = IDENT.fullmatch(name)
+        out.append(name if m else OPAQUE)
+    return out
+
+
+# --------------------------------------------------------------------------
+# The registry
+# --------------------------------------------------------------------------
+
+@dataclass
+class Lang:
+    name: str
+    exts: Tuple[str, ...]
+    blocks: Callable[[str], Iterator[Block]]
+    doc_params: Callable[[str], Optional[List[Tuple[str, int]]]]
+    signature: Callable[[str], Optional[Tuple[str, List[str]]]]
+
+
+LANGS: Dict[str, Lang] = {
+    "js": Lang(
+        name="js",
+        exts=(".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"),
+        blocks=js_blocks,
+        doc_params=js_doc_params,
+        signature=js_signature,
+    ),
+    "java": Lang(
+        name="java",
+        exts=(".java",),
+        blocks=java_blocks,
+        doc_params=java_doc_params,
+        signature=java_signature,
+    ),
+    "csharp": Lang(
+        name="csharp",
+        exts=(".cs",),
+        blocks=cs_blocks,
+        doc_params=cs_doc_params,
+        signature=cs_signature,
+    ),
+    "php": Lang(
+        name="php",
+        exts=(".php",),
+        blocks=php_blocks,
+        doc_params=php_doc_params,
+        signature=php_signature,
+    ),
+    "ruby": Lang(
+        name="ruby",
+        exts=(".rb",),
+        blocks=rb_blocks,
+        doc_params=rb_doc_params,
+        signature=rb_signature,
+    ),
+    "rust": Lang(
+        name="rust",
+        exts=(".rs",),
+        blocks=rs_blocks,
+        doc_params=rs_doc_params,
+        signature=rs_signature,
+    ),
+}
+
+EXT_TO_LANG = {ext: lang for lang in LANGS.values() for ext in lang.exts}
+
+
+# --------------------------------------------------------------------------
+# The scan
+# --------------------------------------------------------------------------
+
+@dataclass
+class Report:
+    files: int = 0
+    files_skipped: int = 0
+    blocks: int = 0
+    blocks_typedef: int = 0
+    blocks_with_params: int = 0
+    bound: int = 0
+    opaque: int = 0
+    findings: List[dict] = dc_field(default_factory=list)
+    unbound: List[Tuple[str, int, str]] = dc_field(default_factory=list)
+    by_lang: Dict[str, List[int]] = dc_field(default_factory=dict)
+
+
+def scan_text(src: str, rel: str, lang: Lang, report: Report) -> None:
+    starts = line_index(src)
+    seen = report.by_lang.setdefault(lang.name, [0, 0])
+    for block in lang.blocks(src):
+        report.blocks += 1
+        documented = lang.doc_params(block.text)
+        if documented is None:
+            report.blocks_typedef += 1
+            continue
+        if not documented:
+            continue
+        report.blocks_with_params += 1
+        seen[1] += 1
+        window = src[block.end:block.end + WINDOW]
+        sig = lang.signature(window)
+        if sig is None:
+            # Kept rather than counted, so `-v` can show what went unmatched.
+            # A percentage that falls says the parser went blind; this list
+            # says on what.
+            report.unbound.append(
+                (rel, line_at(starts, block.end), " ".join(window.split())[:70]))
+            continue
+        report.bound += 1
+        seen[0] += 1
+        symbol, params = sig
+        if OPAQUE in params:
+            report.opaque += 1
+            continue
+        have = set(params)
+        for name, pos in documented:
+            if name in have:
+                continue
+            report.findings.append({
+                "tool": TOOL,
+                "lang": lang.name,
+                "where": rel,
+                "line": line_at(starts, block.body + pos),
+                "symbol": symbol,
+                "documented": name,
+                "signature": params,
+                "hard": True,
+                "why": (f"the comment names `{name}`, the declaration takes "
+                        + (", ".join(f"`{p}`" for p in params) or "nothing")),
+            })
+
+
+def scan(root: str, langs: Sequence[str]) -> Report:
+    report = Report()
+    wanted = {ext for name in langs for ext in LANGS[name].exts}
+    for dirpath, _dirs, names in common.walk(root):
+        for fn in names:
+            ext = os.path.splitext(fn)[1]
+            if ext not in wanted:
+                continue
+            if fn.endswith((".min.js", ".min.ts", ".bundle.js")):
+                report.files_skipped += 1
+                continue
+            path = os.path.join(dirpath, fn)
+            src = common.read_text(path)
+            if not src:
+                report.files_skipped += 1
+                continue
+            if max((len(ln) for ln in src.splitlines()), default=0) > MAX_LINE:
+                report.files_skipped += 1
+                continue
+            report.files += 1
+            scan_text(src, os.path.relpath(path, root), EXT_TO_LANG[ext], report)
+    return report
+
+
+# --------------------------------------------------------------------------
+# The report
+# --------------------------------------------------------------------------
+
+def print_report(report: Report, root: str, verbose: bool = False) -> None:
+    for f in report.findings:
+        where = f"{f['where']}:{f['line']}"
+        symbol = f"{f['symbol']}: " if f["symbol"] else ""
+        print(f"{where}  {symbol}{f['why']}")
+    if not report.findings:
+        print("no documented name is missing from its declaration")
+    if verbose and report.unbound:
+        print()
+        print(f"--- Documented comments with no declaration under them "
+              f"({len(report.unbound)}) ---")
+        for where, line, tail in report.unbound:
+            print(f"  {where}:{line}  {tail}")
+    print()
+    print("=== Coverage ===")
+    print(f"  tree:                   {root}")
+    print(f"  files read:             {report.files}")
+    print(f"  files skipped:          {report.files_skipped} "
+          f"(empty, huge or minified)")
+    print(f"  doc comments:           {report.blocks}")
+    print(f"  of those naming args:   {report.blocks_with_params}")
+    print(f"  describing a type:      {report.blocks_typedef} "
+          f"(@typedef and @callback, not bound to anything)")
+    for name, (bound, total) in sorted(report.by_lang.items()):
+        pct = (100.0 * bound / total) if total else 0.0
+        # 🔴 The line that catches a parser going blind. A report showing
+        # fourteen parsed comments out of twelve hundred looks healthy until
+        # this percentage is printed next to it.
+        print(f"  {name}: bound to a decl:   {bound} of {total} "
+              f"documented ({pct:.0f}% parsed)")
+    print(f"  nothing to compare:     {report.opaque} "
+          f"(a destructured argument has no name)")
+    print(common.findings_line(len(report.findings), 0))
+    print(stamp.line(__file__, ("common.py",)))
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="documented parameter names against the signature under "
+                    "them, in the languages whose markup is a tag")
+    ap.add_argument("root", help="the tree to read")
+    ap.add_argument("--lang", action="append", choices=sorted(LANGS),
+                    help="restrict to one language; repeatable")
+    common.add_common_args(ap)
+    args = ap.parse_args(argv)
+
+    report = scan(args.root, args.lang or sorted(LANGS))
+    print_report(report, args.root, args.verbose)
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump([dict(f, hard=bool(f["hard"]))
+                       for f in report.findings], fh, indent=2)
+    return 1 if report.findings else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

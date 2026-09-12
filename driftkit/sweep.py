@@ -110,6 +110,7 @@ def survey(root: str) -> Dict[str, object]:
         "proto": [], "openapi": [], "go": 0, "changelog": [], "helm_tests": [],
         "lifted_links": 0, "locales": {}, "metadata": [], "workflows": False,
         "generated_spec": False, "text_files": 0, "py": 0, "hpp": 0,
+        "js": 0, "java": 0, "tagged": 0,
     }
     for dirpath, _dirs, names in _walk(root):
         rel = os.path.relpath(dirpath, root)
@@ -144,6 +145,12 @@ def survey(root: str) -> Dict[str, object]:
                 s["hpp"] = int(s["hpp"]) + 1  # type: ignore[arg-type]
             elif low.endswith((".md", ".rst", ".txt", ".yaml", ".yml", ".c", ".h", ".py", ".rs", ".sh")):
                 s["text_files"] = int(s["text_files"]) + 1  # type: ignore[arg-type]
+            if low.endswith((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")):
+                s["js"] = int(s["js"]) + 1  # type: ignore[arg-type]
+            if low.endswith((".java", ".cs", ".php", ".rb", ".rs")):
+                s["tagged"] = int(s["tagged"]) + 1  # type: ignore[arg-type]
+            if low.endswith(".java"):
+                s["java"] = int(s["java"]) + 1  # type: ignore[arg-type]
             if n in ("pyproject.toml", "setup.py", "setup.cfg", "go.mod", "Cargo.toml", "package.json"):
                 if dirpath == root:
                     s["metadata"].append(n)  # type: ignore[union-attr]
@@ -262,6 +269,16 @@ def build_plan(root: str, s: Dict[str, object], network: bool) -> List[Plan]:
         plans.append(Plan("doxdrift", True, f"{s['hpp']} .hpp headers", [[root]]))
     else:
         plans.append(Plan("doxdrift", False, "almost no .hpp headers"))
+
+    tagged = int(s["js"]) + int(s["tagged"])  # type: ignore[arg-type]
+    if tagged >= 5:
+        plans.append(Plan("paramdrift", True,
+                          f"{s['js']} JavaScript and TypeScript files, "
+                          f"{s['tagged']} in Java, C#, PHP, Ruby or Rust",
+                          [[root]]))
+    else:
+        plans.append(Plan("paramdrift", False,
+                          "almost nothing in the six languages it reads"))
 
     if s["helm_tests"]:
         plans.append(Plan("assertdrift", True, f"{len(s['helm_tests'])} helm-unittest suites",  # type: ignore[arg-type]
@@ -410,8 +427,20 @@ def print_report(root: str, plans: Sequence[Plan], results: Sequence[Result],
     print("\n--- Plan ---")
     for p in plans:
         mark = "yes" if p.applies else "no "
+        where = common.place_of(p.tool)
+        # Where a check belongs is part of the plan, not a detail of the run.
+        # A build check executes foreign code and wants a disposable runner;
+        # saying so in the plan is what keeps it off a laptop by accident.
+        tag = {"local": "", "network": "  [network]", "build": "  [online only]"}[where]
         net = " (needs the network for proof)" if p.applies and p.needs_network else ""
-        print(f"  [{mark}] {p.tool:14s} {p.reason}{net}")
+        print(f"  [{mark}] {p.tool:14s} {p.reason}{net}{tag}")
+
+    online = [p.tool for p in plans if p.applies and common.place_of(p.tool) == common.BUILD]
+    if online:
+        print(f"\n  belongs on a runner rather than here: {', '.join(online)}")
+        print(f"  limits for an online run: {common.LIMITS['targets_per_run']} projects, "
+              f"{common.LIMITS['parallel_targets']} at a time, "
+              f"{common.LIMITS['job_timeout_minutes']} min per job")
 
     if not results:
         print("\n(plan only, nothing was run)")

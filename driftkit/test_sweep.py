@@ -155,7 +155,7 @@ class TestRun(unittest.TestCase):
         """A skipped tool has to appear in the result rather than vanish."""
         root = project({"README.md": "hi\n" * 30})
         _plans, results, _site, _ref = sweep.sweep(root, network=False, only=None, dry=False)
-        self.assertEqual(len(results), 11, "the kit has eleven detectors and none may vanish")
+        self.assertEqual(len(results), 12, "the kit has twelve detectors in the sweep and none may vanish")
         skipped = [r for r in results if not r.ran]
         self.assertTrue(skipped)
         for r in skipped:

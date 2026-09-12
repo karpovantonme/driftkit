@@ -31,7 +31,7 @@ import common  # noqa: E402
 DETECTORS = [
     "ifacedrift", "liftdrift", "transdrift", "gitdrift",
     "supportdrift", "namedrift", "deaddrift", "assertdrift", "linkdrift",
-    "docdrift", "doxdrift",
+    "docdrift", "doxdrift", "paramdrift",
 ]
 # Pipeline stages: they do not look for defects, they decide what to do with them.
 PIPELINE = ["sitecheck", "refute", "probe", "lessons", "buildprobe"]
@@ -171,6 +171,44 @@ class TestContract(unittest.TestCase):
                 f"{t}: header does not say what the tool cannot see",
             )
 
+    def test_no_private_skip_list_inside_a_walk(self):
+        """A skip list written inline in `os.walk` escapes the check above.
+
+        `gitdrift` named three directories right inside `dirs[:] = [...]`, so it
+        never matched the `SKIP_DIRS =` pattern and quietly walked trees the rest
+        of the kit skips. A private list drifts apart; that is the bug this file
+        exists for, in a place the file could not see.
+        """
+        for t in TOOLS + ["sweep"]:
+            s = source(t)
+            # The whole statement, not the first line of it: a list written
+            # across three lines used to slip past this very check.
+            for m in re.finditer(r"dirs\[:\]\s*=\s*(.+?\])", s, re.S):
+                self.assertTrue(
+                    "SKIP_DIRS" in m.group(1) or "common." in m.group(1),
+                    f"{t}: a skip list written inline in the walk",
+                )
+
+    def test_every_reader_counts_what_it_skips(self):
+        """A file dropped without a counter makes the report look cleaner.
+
+        Four tools used to `continue` past an unreadable or oversized file with
+        no trace at all. The whole species is about coverage rather than false
+        findings, and it costs more: a false finding shouts, a gap stays silent.
+        """
+        for t in ("deaddrift", "namedrift", "linkdrift", "doxdrift", "gitdrift", "docdrift"):
+            if t not in TOOLS:
+                continue
+            s = source(t)
+            self.assertRegex(
+                s, r"(files_skipped|skipped_files|COUNTS\[.skipped.\]|unparsable)",
+                f"{t}: skipped files are not counted",
+            )
+            self.assertRegex(
+                s, r"(files skipped|headers skipped|failed to parse)",
+                f"{t}: skipped files are not printed in the coverage block",
+            )
+
     def test_no_private_skip_lists(self):
         """The skip list was declared three times, differently each time.
         There is one for the whole kit."""
@@ -178,6 +216,96 @@ class TestContract(unittest.TestCase):
             s = source(t)
             for m in re.finditer(r"SKIP_DIRS\s*=\s*(.+)", s):
                 self.assertIn("common.SKIP_DIRS", m.group(1), f"{t}: private skip list")
+
+
+class TestEveryToolDeclaresItsPlace(unittest.TestCase):
+    """Where a check runs belongs to the contract, not to whoever starts it.
+
+    Three kinds live here: one reads text, one talks to other people's servers,
+    one executes foreign code. Only the first is safe to start anywhere. An
+    undeclared tool would quietly default to local, which is exactly how a
+    laptop ends up compiling somebody else's test suite.
+    """
+
+    def test_every_tool_has_a_place(self):
+        for t in TOOLS:
+            self.assertIn(t, common.PLACE, f"{t}: no place declared in common.PLACE")
+            self.assertIn(common.PLACE[t], (common.LOCAL, common.NETWORK, common.BUILD))
+
+    def test_a_build_check_does_not_run_here_by_default(self):
+        for t in TOOLS:
+            if common.place_of(t) != common.BUILD:
+                continue
+            self.assertFalse(common.runs_here(t), f"{t}: a build check must not run locally")
+            self.assertTrue(common.runs_here(t, allow_build=True))
+
+    def test_the_ceilings_exist_and_are_small(self):
+        """A hundred parallel clones is no technical problem, it is bad manners."""
+        for key in ("targets_per_run", "parallel_targets", "job_timeout_minutes",
+                    "network_runs_at_once", "clone_depth"):
+            self.assertIn(key, common.LIMITS)
+        self.assertLessEqual(common.LIMITS["parallel_targets"], 4)
+        self.assertLessEqual(common.LIMITS["targets_per_run"], 20)
+        self.assertEqual(common.LIMITS["network_runs_at_once"], 1)
+
+
+class TestWorkflowsHonourTheLimits(unittest.TestCase):
+    """The ceilings in the kit and the ceilings in CI have to be the same ones.
+
+    Two copies of a number drift apart; that is the bug this whole file exists
+    for. Here the risk is worse than a wrong report: a workflow that quietly
+    grew its parallelism spends somebody else's runners.
+    """
+
+    # The workshop is the source; the published repository is assembled from it.
+    # A workflow kept only in the published tree would be the second copy of one
+    # thing, which is the bug this file exists for.
+    # Two layouts, one source. In the workshop the sources sit next to the kit;
+    # in the published repository GitHub requires them at `.github/workflows`.
+    # The check reads whichever is there rather than assuming one of them.
+    PLACES = (os.path.join(HERE, "workflows"),
+              os.path.join(PARENT, ".github", "workflows"))
+
+    def workflow(self, name):
+        for base in self.PLACES:
+            path = os.path.join(base, name)
+            if os.path.isfile(path):
+                return common.read_text(path)
+        self.fail(f"{name}: no workflow source in either layout")
+
+    @staticmethod
+    def _uncommented(text: str) -> str:
+        """Only what YAML actually reads.
+
+        The first version of this check searched the whole file and tripped over
+        the word `pull_request` inside a comment explaining why there is no such
+        trigger. A checker that cannot tell a rule from a note about the rule is
+        the same species as a parser that reads a comment as code.
+        """
+        return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+    def test_nothing_is_triggered_by_a_stranger(self):
+        """No `pull_request` trigger: a stranger must not spend our minutes."""
+        for name in ("tests.yml", "behaviour.yml"):
+            text = self._uncommented(self.workflow(name))
+            self.assertNotRegex(text, r"^\s+pull_request(_target)?:",
+                                f"{name}: a fork could start this")
+            self.assertIn("github.repository_owner ==", text,
+                          f"{name}: a fork gets our workflow for free")
+
+    def test_the_heavy_one_is_dispatch_only_and_queued(self):
+        text = self.workflow("behaviour.yml")
+        self.assertIn("workflow_dispatch", text)
+        self.assertIn("concurrency:", text)
+        self.assertIn("cancel-in-progress: false", text,
+                      "runs have to queue rather than pile up or cancel each other")
+        self.assertIn(f"max-parallel: {common.LIMITS['parallel_targets']}", text)
+
+    def test_the_ceiling_comes_from_the_kit_rather_than_the_yaml(self):
+        """The number of projects per run is read from `common.LIMITS` at run time."""
+        text = self.workflow("behaviour.yml")
+        self.assertIn("common.LIMITS['targets_per_run']", text)
+        self.assertIn("common.LIMITS['clone_depth']", text)
 
 
 class TestSweepKnowsEveryTool(unittest.TestCase):

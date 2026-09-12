@@ -57,6 +57,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import common  # noqa: E402
 import stamp  # noqa: E402
 
 import gosym  # noqa: E402
@@ -108,6 +109,7 @@ class Finding:
 @dataclass
 class Report:
     files: int = 0
+    skipped_files: int = 0
     structs: int = 0
     walkers: int = 0
     enums: int = 0
@@ -264,14 +266,21 @@ def scan_file(path: str, src: str, report: Report) -> List[Finding]:
 
 def discover(root: str, report: Report) -> List[Finding]:
     out: List[Finding] = []
-    for dirpath, dirs, names in os.walk(root):
-        dirs[:] = [x for x in dirs if x not in ("vendor", "testdata", ".git")]
+    # The shared skip list rather than a private one. This walk used to name
+    # three directories inline, which is how a private list drifts apart from
+    # the kit: the same mistake as the three copies that once diverged.
+    for dirpath, _dirs, names in common.walk(root):
         for n in sorted(names):
             if not n.endswith(".go") or n.endswith("_test.go"):
                 continue
             p = os.path.join(dirpath, n)
-            with open(p, encoding="utf-8", errors="replace") as fh:
-                src = fh.read()
+            src = common.read_text(p)
+            if not src:
+                # Unreadable or over the size limit. Counted rather than
+                # dropped: a file that vanishes without a trace makes the
+                # report look cleaner than the run was.
+                report.skipped_files += 1
+                continue
             report.files += 1
             out.extend(scan_file(p, src, report))
     return out
@@ -389,6 +398,7 @@ def print_report(report: Report, verbose: bool = False) -> None:
 
     print("\n=== Coverage ===")
     print(f"  files read:             {report.files}")
+    print(f"  files skipped:          {report.skipped_files} (unreadable or over the size limit)")
     print(f"  structs found:          {report.structs}")
     print(f"  structs too small:      {len(report.small_structs)} (fewer than {MIN_FIELDS})")
     print(f"  walkers found:          {report.walkers}")

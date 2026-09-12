@@ -158,6 +158,7 @@ class Report:
     sections: int = 0
     removed_names: Dict[str, Tuple[str, str]] = dc_field(default_factory=dict)  # name -> (coordinate, section)
     files_searched: int = 0
+    files_skipped: int = 0
     far_from_verb: List[str] = dc_field(default_factory=list)
     survivors: Set[str] = dc_field(default_factory=set)
     renamed_away: List[str] = dc_field(default_factory=list)
@@ -332,10 +333,12 @@ def search_mentions(root: str, report: Report) -> None:
                 continue
             try:
                 if os.path.getsize(path) > 4_000_000:
+                    report.files_skipped += 1
                     continue
                 with open(path, encoding="utf-8", errors="replace") as fh:
                     lines = fh.read().splitlines()
             except OSError:
+                report.files_skipped += 1
                 continue
             report.files_searched += 1
             is_doc = ext in DOC_EXT + CONFIG_EXT
@@ -412,6 +415,7 @@ def print_report(report: Report, verbose: bool = False) -> None:
     print(f"  removal sections:       {report.sections}")
     print(f"  removed names:          {len(report.removed_names)}")
     print(f"  files searched:         {report.files_searched}")
+    print(f"  files skipped:          {report.files_skipped} (unreadable or over the size limit)")
     print(f"  name far from the verb: {len(report.far_from_verb)} (something about it went away)")
     print(f"  successor names:        {len(report.renamed_away)} (right of 'is now', therefore alive)")
     print(f"  scenario, not the name: {len(report.scoped)} ('restart from --step ... is removed')")
