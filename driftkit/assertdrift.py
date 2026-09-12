@@ -113,6 +113,7 @@ class Report:
     assertions: int = 0
     legit_siblings: int = 0
     unparsed: List[str] = dc_field(default_factory=list)
+    skipped_no_yaml: bool = False
     findings: List[Finding] = dc_field(default_factory=list)
 
 
@@ -182,8 +183,14 @@ def scan_file(path: str, root: str, report: Report) -> None:
 
 
 def analyse(root: str, report: Report) -> None:
+    # A missing dependency is not a reason to kill the process. In a sweep over
+    # a hundred projects `sys.exit` here took the whole run down, and on a
+    # machine where pip is blocked by PEP 668 there was no way around it. Worse,
+    # a tool that dies is indistinguishable in a log from a tool that found
+    # nothing. Say what is missing, count it, and let the sweep continue.
     if yaml is None:
-        sys.exit("pyyaml required: pip3 install pyyaml")
+        report.skipped_no_yaml = True
+        return
     for dirpath, dirs, names in os.walk(root):
         dirs[:] = [d for d in dirs
                    if d not in common.SKIP_DIRS
@@ -203,6 +210,10 @@ def print_report(report: Report, verbose: bool = False) -> None:
             print(f"  mutation: {f.probe}")
 
     print("\n=== Coverage ===")
+    if report.skipped_no_yaml:
+        print("  NOT RUN:                pyyaml is missing, so nothing was read.")
+        print("                          pip3 install pyyaml, or use a venv if")
+        print("                          the system python refuses (PEP 668).")
     print(f"  test files:             {report.files}")
     print(f"  tests:                  {report.tests}")
     print(f"  assertions:             {report.assertions}")

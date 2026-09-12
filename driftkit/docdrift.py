@@ -24,8 +24,10 @@ confirmation rate. There is no such measurement: findings from this check
 have so far been read one by one.
 
 KNOWN BLIND SPOTS:
-  - **numpydoc only.** Google style (`Args:`) is not parsed at all: indentation
-    carries less meaning there and the parse gets noisy;
+  - both numpydoc and Google style (`Args:`) are read. Google style was added
+    on 19.08.2026 after a run on PySceneDetect reported the project checked
+    while looking at 0 of its arguments. reStructuredText fields (`:param x:`)
+    are still not parsed;
   - functions with `*args`/`**kwargs` are skipped for class A, since anything
     may legitimately be documented for them;
   - defaults computed by an expression rather than written as a literal are
@@ -62,7 +64,26 @@ import stamp  # noqa: E402
 # tests, examples and docs are written to illustrate, not to describe an API.
 SKIP_DIRS = common.SKIP_DIRS | {
     "test", "tests", "testing", "_test", "doc", "docs", "examples", "benchmarks",
-    ".tox",
+    # `samples` sits next to `examples` for the same reason: adk-python keeps
+    # its demo agents in contributing/samples, and a line like
+    # `Example: { "location_name": "Basel" }` at parameter indent reads as an
+    # argument there.
+    "samples", ".tox",
+    # Two reasons to skip, and they are not the same reason.
+    #
+    # Not shipped: statsmodels keeps a top-level `archive/`, and 12 of the 13
+    # findings there came out of it. Textually real, in a directory that no
+    # release contains and nobody will patch.
+    #
+    # Not ours: vendored copies belong to another project, and a fix has to go
+    # upstream rather than here.
+    #
+    # 🔴 `legacy` and `deprecated` are deliberately absent. keras ships 24
+    # Python files under `legacy/`, people import them, and a wrong docstring
+    # there is as wrong as anywhere else. Skipping them dropped 38 functions
+    # from the count and called it an improvement.
+    "archive", "_archive", "attic",
+    "vendor", "vendored", "third_party", "3rdparty",
 }
 
 # A trailing colon after the heading is allowed. pyGSTi writes `Returns:` above
@@ -91,8 +112,44 @@ PARAMLINE = re.compile(
 # every fractional default became a mismatch. The value now ends at a sentence
 # boundary (". ") or at a comma, not at the first dot. Same family of mistake
 # as a flag name truncated mid-word.
+# `defaults? to` comes first on purpose. Written the other way round, the
+# generic `default[\s:=]+` branch matches "Default to `-1`" as the word
+# `default` plus a separator, and the value read out is `to`. Seen in
+# keras/src/ops/nn.py.
+# The value ends at a sentence boundary, at a semicolon, or at a bracket that
+# is not part of the value itself.
+#
+# 🔴 Two ways this was wrong, both found on live runs 20.08.2026. A comma is a
+# thousands separator as often as it is a list separator: `(default: 33,592)`
+# was read as `33` and never matched `33_592`. And a subscript carries its own
+# brackets: `default=tlist[-1]` was read as `tlist[-1`, which matched nothing
+# and printed a finding with a visibly truncated value.
+#
+# Brackets are now balanced rather than banned, and a comma only ends the value
+# when digits do not sit on both sides of it.
 DEFAULT_IN_TYPE = re.compile(
-    r'(?:default[\s:=]+|defaults to\s+)(?P<val>[^,;)\]]+?)(?=\.\s|[,;)\]]|$)', re.I)
+    r'(?:defaults?\s+to\s+|default[\s:=]+)(?P<val>.+?)(?=\.\s|;|$)', re.I)
+
+
+def clean_default(raw: str) -> str:
+    """Cut a captured default at the first separator that is really one."""
+    out, depth = [], 0
+    for i, ch in enumerate(raw):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch == ",":
+            # A thousands separator has digits on both sides. A list separator
+            # does not.
+            left = raw[i - 1] if i else ""
+            right = raw[i + 1] if i + 1 < len(raw) else ""
+            if not (left.isdigit() and right.isdigit()):
+                break
+        out.append(ch)
+    return "".join(out).strip()
 EXAMPLES = re.compile(r'^\s*Examples?\s*:?\s*$', re.I)
 # Notes inside a Parameters section parse as arguments: the line
 # `TODO: looks like not used yet` is shaped exactly like `name : type`.
@@ -192,7 +249,16 @@ def doc_params(doc):
             j = i + 2
             while j < len(lines):
                 ln = lines[j]
-                if ANYSEC.match(ln) and j + 1 < len(lines) and UNDER.match(lines[j + 1]):
+                # A heading ends the section when it is underlined, which is
+                # how numpydoc writes one, and also when it simply ends in a
+                # colon. Mixed docstrings exist: pyvo writes `Returns:` in the
+                # Google form inside a numpydoc block, and with only the
+                # underlined form recognised the word `Returns` parsed as a
+                # parameter of the function.
+                if ANYSEC.match(ln) and (
+                    (j + 1 < len(lines) and UNDER.match(lines[j + 1]))
+                    or ln.rstrip().endswith(":")
+                ):
                     break
                 m = PARAMLINE.match(ln)
                 if m and ln.strip():
@@ -218,6 +284,217 @@ def doc_params(doc):
         else:
             i += 1
     return out
+
+
+
+# ---------------------------------------------------------------------------
+# Google style.
+#
+# Added 19.08.2026 after a live run on Breakthrough/PySceneDetect: 51 files
+# read, `functions with Parameters: 0`, and 0 findings. The tool reported the
+# project as checked and had not looked at a single argument, because the
+# whole repository writes `Args:` rather than `Parameters` with an underline.
+# A throwaway 70-line parser found 3 real mismatches in it.
+#
+# 🔴 The colon means different things in the two dialects, and reusing PARAMLINE
+# here would be silently wrong:
+#
+#     numpydoc:   name : type          <- after the colon is the TYPE
+#     google:     name: description    <- after the colon is the DESCRIPTION
+#                 name (type): description
+#
+# Feeding a description into the type string would make DEFAULT_IN_TYPE read
+# "Defaults to 5" out of prose that is not a type, so the type here is taken
+# only from the parentheses, and the description is passed along separately so
+# a documented default is still found where Google style actually writes it.
+GOOGLE_SEC = re.compile(
+    r'^\s*(Args|Arguments|Keyword Args|Keyword Arguments|Parameters)\s*:\s*$', re.I)
+GOOGLE_ANYSEC = re.compile(
+    r'^\s*(Returns?|Yields?|Raises|Note|Notes|Example|Examples|Attributes|'
+    r'Todo|Warns|Warning|Warnings|References|See Also|Other Parameters)\s*:\s*$', re.I)
+# `name (type, optional): text` and `*args: text` and bare `name: text`.
+GOOGLE_PARAM = re.compile(
+    r'^(?P<ind>\s*)(?P<name>\*{0,2}\w+)\s*(?:\((?P<type>[^)]*)\))?\s*:\s*(?P<desc>.*)$')
+
+
+def strip_fences(lines):
+    """Drop fenced blocks. What is inside them is an example, not this docstring.
+
+    adk-python shows a prompt template inside triple backticks, and that
+    template contains a whole docstring of its own with its own `Args:`. Its
+    parameters came out as findings about the enclosing function: timezone,
+    location, time. `cut_at_examples` does not help, because a fence needs no
+    `Examples:` heading above it.
+    """
+    out, inside = [], False
+    for ln in lines:
+        if ln.lstrip().startswith("```"):
+            inside = not inside
+            out.append("")
+            continue
+        out.append("" if inside else ln)
+    return out
+
+
+def doc_params_google(doc):
+    """-> [(names, type string, line number)], the same shape as doc_params.
+
+    A parameter line sits at one indent and its continuation lines sit deeper,
+    which is the only reliable way to tell `name: description` from a wrapped
+    sentence that happens to contain a colon. The base indent comes from the
+    first parameter under the heading and is then fixed, for the same reason it
+    is fixed in the numpydoc parser: letting a later line reset it is how a
+    wrapped URL becomes an argument called `https`.
+    """
+    lines = strip_fences(cut_at_examples(doc.split('\n')))
+    out, i = [], 0
+    while i < len(lines):
+        if not GOOGLE_SEC.match(lines[i]):
+            i += 1
+            continue
+        head_ind = len(lines[i]) - len(lines[i].lstrip())
+        j, base_ind = i + 1, None
+        while j < len(lines):
+            ln = lines[j]
+            if not ln.strip():
+                j += 1
+                continue
+            ind = len(ln) - len(ln.lstrip())
+            # Back out to the heading level, or a sibling section: done.
+            if ind <= head_ind or GOOGLE_ANYSEC.match(ln):
+                break
+            # A second heading inside the section restarts it rather than
+            # counting as a parameter. `application_integration_toolset.py`
+            # opens with `"""Args:` as its summary line and carries the real
+            # `Args:` below, and the nested heading parsed as an argument
+            # literally named Args.
+            if GOOGLE_SEC.match(ln):
+                base_ind = None
+                head_ind = ind
+                j += 1
+                continue
+            m = GOOGLE_PARAM.match(ln)
+            if m:
+                if base_ind is None:
+                    base_ind = ind
+                if ind == base_ind:
+                    name = m.group('name').lstrip('*')
+                    if re.fullmatch(r'\w+', name) and not is_note(name) \
+                            and name not in NOT_A_NAME:
+                        # The type goes in from the parentheses only. The
+                        # description rides along after it so a default written
+                        # as "Defaults to 5." is still visible to the caller,
+                        # and nothing that is merely prose can pass for a type.
+                        typ = (m.group('type') or '').strip()
+                        desc = m.group('desc') or ''
+                        # Continuation lines join the description. Google style
+                        # wraps freely, and keras writes "Default to" at the end
+                        # of one line with the value on the next. Reading a
+                        # single line then found the words and no value, and the
+                        # default came out as the word `to`.
+                        k = j + 1
+                        while k < len(lines):
+                            nxt = lines[k]
+                            if not nxt.strip():
+                                k += 1
+                                continue
+                            nxt_ind = len(nxt) - len(nxt.lstrip())
+                            if nxt_ind <= base_ind or GOOGLE_ANYSEC.match(nxt):
+                                break
+                            desc += ' ' + nxt.strip()
+                            k += 1
+                        out.append(([name], f"{typ} {desc}".strip(), j))
+            j += 1
+        i = j
+    return out
+
+
+
+# ---------------------------------------------------------------------------
+# Sphinx, also called reST field lists.
+#
+# The third dialect and the largest one missing. Added 20.08.2026 after a run
+# on deepinv read 231 files, parsed 14 functions and reported the project
+# checked: 857 of its 871 documented functions are written this way, and the
+# tree holds 4697 `:param` fields.
+#
+# The shape, and the one thing that makes it awkward:
+#
+#     :param x: description                 <- no type
+#     :param int max_iter: description       <- type before the name
+#     :param torch.Tensor x: description     <- dotted type
+#     :param torch.device, str device: text  <- comma INSIDE the type
+#
+# 🔴 The name is the last whitespace-separated token before the closing colon,
+# never the first. Splitting on the comma would read `torch.device` as one
+# parameter and `str device` as another, and deepinv writes 43 of those.
+# A trailing comma on the type (`:param bool, as_memmap:`) is a typo in the
+# source rather than a second name, and the same rule handles it.
+SPHINX_FIELD = re.compile(
+    r'^(?P<ind>\s*):(?P<kind>param|parameter|arg|argument|key|keyword)\s+'
+    r'(?P<head>[^:]+?)\s*:(?P<desc>.*)$')
+# Any other field ends the run of parameters. `:return:` and `:rtype:` are the
+# common ones, and an unknown field is treated the same way rather than
+# swallowed as a description.
+SPHINX_OTHER = re.compile(r'^\s*:(?!param|parameter|arg|argument|key|keyword)\w[\w\s]*:')
+SPHINX_TYPE = re.compile(r'^\s*:type\s+(?P<name>\w+)\s*:\s*(?P<type>.*)$')
+
+
+def doc_params_sphinx(doc):
+    """-> [(names, type string, line number)], the same shape as doc_params."""
+    lines = strip_fences(cut_at_examples(doc.split('\n')))
+    types = {}
+    for ln in lines:
+        m = SPHINX_TYPE.match(ln)
+        if m:
+            types[m.group('name')] = m.group('type').strip()
+
+    out = []
+    for i, ln in enumerate(lines):
+        m = SPHINX_FIELD.match(ln)
+        if not m:
+            continue
+        head = m.group('head').strip()
+        if not head:
+            continue
+        parts = head.split()
+        name = parts[-1]
+        if not re.fullmatch(r'\*{0,2}\w+', name):
+            continue
+        name = name.lstrip('*')
+        if is_note(name) or name in NOT_A_NAME:
+            continue
+        declared = " ".join(parts[:-1]).rstrip(',').strip()
+        typ = declared or types.get(name, "")
+
+        # The description carries the default in this dialect, the same way it
+        # does in Google style, so it rides along and continuation lines join
+        # it. Sphinx wraps as freely as anything else.
+        desc = m.group('desc').strip()
+        ind = len(m.group('ind'))
+        for nxt in lines[i + 1:]:
+            if not nxt.strip():
+                break
+            if SPHINX_FIELD.match(nxt) or SPHINX_OTHER.match(nxt):
+                break
+            if len(nxt) - len(nxt.lstrip()) <= ind:
+                break
+            desc += ' ' + nxt.strip()
+
+        out.append(([name], f"{typ} {desc}".strip(), i))
+    return out
+
+
+def doc_params_any(doc):
+    """numpydoc first, Google style when it finds nothing.
+
+    Order matters rather than being a preference. A numpydoc docstring can
+    carry `Returns:` with a colon inside a Notes block and would then look
+    faintly like Google style, while the reverse does not happen: Google style
+    never underlines a heading. So the stricter dialect is tried first and the
+    looser one only answers where the strict one saw nothing at all.
+    """
+    return doc_params(doc) or doc_params_google(doc) or doc_params_sphinx(doc)
 
 
 # Compatibility decorators accept names beyond the ones in the signature.
@@ -332,6 +609,62 @@ def is_property(fn) -> bool:
     return False
 
 
+def replaced_in_body(fn, name: str) -> bool:
+    """Does the body immediately swap this argument for something else.
+
+    A sentinel default is a real idiom and the docstring that names the real
+    value is telling the truth. qutip writes `T: float = 0.0` and then
+    `T = T or tlist[-1]` on the first line, and documents `default=tlist[-1]`.
+    Comparing against the signature alone calls that a mismatch, and it is not.
+
+    Only the opening statements count, but the search goes inside them: qutip
+    puts `T = T or tlist[-1]` in the else branch of the first `if`, and looking
+    at the top level alone missed it. Reading the whole body instead would
+    silence real findings, since reassigning an argument halfway down is
+    ordinary flow rather than a default.
+    """
+    opening = []
+    for st in fn.body[:4]:
+        opening.extend(ast.walk(st))
+    for node in opening:
+        # `x = x or something`
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            tgt = node.targets[0]
+            if isinstance(tgt, ast.Name) and tgt.id == name:
+                v = node.value
+                if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or):
+                    if any(isinstance(x, ast.Name) and x.id == name for x in v.values):
+                        return True
+                # `x = Y if cond else x` keeps the argument when the
+                # condition fails, so the documented default still describes
+                # what happens by default.
+                #
+                # 🔴 Treating every ternary as a replacement silenced a real
+                # finding: keras writes
+                # `safe_mode = scope if scope is not None else safe_mode`,
+                # and suppressing it hid a docstring that said a security
+                # control defaults to off when it defaults to on.
+                if isinstance(v, ast.IfExp):
+                    keeps_arg = any(
+                        isinstance(x, ast.Name) and x.id == name
+                        for x in ast.walk(v.orelse)
+                    )
+                    if not keeps_arg:
+                        return True
+        # `if x is None: x = something`
+        if isinstance(node, ast.If):
+            test = node.test
+            if isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) \
+                    and test.left.id == name \
+                    and any(isinstance(o, (ast.Is, ast.Eq)) for o in test.ops):
+                for inner in node.body:
+                    if isinstance(inner, ast.Assign) and len(inner.targets) == 1:
+                        it = inner.targets[0]
+                        if isinstance(it, ast.Name) and it.id == name:
+                            return True
+    return False
+
+
 def sig_params(fn):
     a = fn.args
     names, defaults = [], {}
@@ -396,7 +729,30 @@ def is_prose(val: str) -> bool:
 
 
 def norm(v):
-    s = str(v).strip().strip('`"\'').rstrip('.')
+    """Strip the punctuation a docstring wraps a value in, until it stops changing.
+
+    One pass is not enough and the reason is worth keeping. A docstring writes
+    "Defaults to `-1`." and the two kinds of rubbish hide behind each other:
+    stripping quotes first leaves the trailing backtick under the full stop,
+    and stripping the stop afterwards has nothing left to run. The value came
+    out as `-1` with a backtick still attached and matched no literal at all.
+
+    Measured 20.08.2026 on keras and flax: 40 of 57 false positives in one run
+    were this and nothing else. Same shape as the quote hiding under a bracket
+    in linkdrift, fixed there the day before.
+    """
+    s = str(v).strip()
+    while True:
+        before = s
+        s = s.strip('`"\'').strip().rstrip('.').strip()
+        if s == before:
+            break
+    # A thousands separator is presentation, not value. The docstring writes
+    # 33,592 and the code writes 33_592; both mean the same number and the
+    # comparison has to see that. Python's own separator goes too, since the
+    # literal side arrives as text here.
+    if re.fullmatch(r'-?\d{1,3}(?:[,_]\d{3})+(?:\.\d+)?', s):
+        s = s.replace(',', '').replace('_', '')
     return {'true': 'True', 'false': 'False', 'none': 'None'}.get(s.lower(), s)
 
 
@@ -441,8 +797,17 @@ def scan_file(path, repo):
         if author_switched_off(lines, fn):
             COUNTS["suppressed"] += 1
             continue
-        dp = doc_params(doc)
+        dp = doc_params_any(doc)
         if not dp:
+            # A docstring is here and no parameters came out of it. Either it
+            # documents none, or it is written in a dialect this file cannot
+            # read. Counting the difference is the only thing standing between
+            # a clean report and a blind one: on deepinv the tool read 14
+            # functions out of 1232 documented, found nothing, and printed a
+            # coverage block that looked healthy. 1204 of those are Sphinx
+            # `:param x:` fields, a dialect not parsed here at all.
+            if DOCUMENTS_SOMETHING.search(doc):
+                COUNTS["unread_docstrings"] += 1
             continue
         COUNTS["funcs"] += 1
         names, defaults, star = sig_params(fn)
@@ -462,7 +827,12 @@ def scan_file(path, repo):
                         actual = lit(defaults[dn])
                         if actual is ...:
                             continue
-                        want = norm(m.group('val'))
+                        if replaced_in_body(fn, dn):
+                            # The signature holds a sentinel and the body swaps
+                            # it on the first line. The docstring names what it
+                            # becomes, and that is the honest thing to document.
+                            continue
+                        want = norm(clean_default(m.group('val')))
                         got = norm(repr(actual) if isinstance(actual, str) else actual)
                         # Sentinel `None`: the code says None, the docstring
                         # says what it turns into ("default: nx.Graph"). A
@@ -482,7 +852,26 @@ def scan_file(path, repo):
 # --------------------------------------------------------------------------
 
 
+# A docstring that names arguments in some dialect. Used only to tell "this
+# function documents nothing" apart from "this file cannot read how it does",
+# which is the difference between an honest zero and a silent one.
+#
+# 🔴 The Sphinx form puts the type BEFORE the name: `:param int in_channels:`.
+# A pattern demanding one word before the colon counted 88 unread docstrings on
+# deepinv where the tree holds 4697 `:param` fields, so the warning it printed
+# was itself an understatement.
+DOCUMENTS_SOMETHING = re.compile(
+    r'^\s*(?:'
+    r':(?:param|parameter|arg|argument|key|keyword|type)\s+[^:]+:'   # Sphinx / reST
+    r'|@(?:param|keyword|type)\s+\w+'                               # Epytext, old Epydoc
+    r'|\\param\b|@param\b'                                          # Doxygen, in C++ bindings
+    r'|Args?\s*:|Arguments\s*:|Keyword Args?\s*:'                   # Google
+    r'|Params?\s*:'                                                  # anndata writes `Params:`
+    r'|Parameters\s*:?\s*$'                                         # numpydoc heading
+    r')', re.M | re.I)
+
 COUNTS: Dict[str, int] = {"files": 0, "funcs": 0, "props": 0, "compat_blind": 0,
+                          "unread_docstrings": 0,
                           "unparsable": 0, "unreadable": 0, "numpydoc_failed": 0,
                           "suppressed": 0}
 
@@ -662,21 +1051,75 @@ def is_hard(hit: dict) -> bool:
     return hit.get("kind") == "A"
 
 
+
+# ---------------------------------------------------------------------------
+# Severity, added 20.08.2026.
+#
+# A finding whose parameter guards something costs more when it is wrong. In
+# keras, `deserialize_keras_object` documented `safe_mode` as defaulting to
+# False when it defaults to True: the text says the protection against unsafe
+# lambda deserialization is off, and explains how to turn it off further. A
+# misspelled parameter name costs a reader a minute. That line invites them to
+# disable arbitrary code execution protection they already had.
+#
+# 🔴 This is a lens on findings already made, not a search of its own, and the
+# distinction is the whole point. A sweep over 59 repositories produced 607
+# findings, 3 carried a guard-shaped name and 2 of those were real: 0.49%.
+# Four separate probes of what docdrift structurally cannot see returned zero
+# security findings between them, because the pools barely overlap. Guard flags
+# live where reST and Google style are written; the numpydoc blind spot lives
+# in the scientific stack, which has almost no guard flags.
+#
+# So there is no securedrift to write. There is a word list and a flag, and
+# their value is triage: which of 607 to send first, and in what words.
+#
+# 🔴 What this is not: a vulnerability scanner. It reports that a sentence and
+# a signature disagree about something protective. It says nothing about
+# whether anything is exploitable, and a report built on it must not imply
+# otherwise. Real security findings have their own etiquette, private
+# disclosure and windows, and walking into that without grounds is how you get
+# ignored at best.
+GUARD_WORDS = frozenset({
+    "safe", "safe_mode", "unsafe", "secure", "insecure", "verify", "verified",
+    "verification", "validate", "validation", "strict", "check", "checks",
+    "trust", "trusted", "untrusted", "sanitize", "sanitise", "escape",
+    "allow_unsafe", "check_hostname", "ssl", "tls", "cert", "certificate",
+    "auth", "authenticate", "authorization", "permission", "privilege",
+    "sandbox", "isolation", "signature_check", "weights_only",
+})
+
+
+def guards_something(param: str) -> bool:
+    """True when the parameter name reads as a guard.
+
+    Split on the usual separators rather than matched as a substring: `check`
+    must fire on `check_hostname` and stay quiet on `checkpoint`, which is
+    ordinary in this corpus and guards nothing.
+    """
+    parts = re.split(r"[_\-.]", param.lower())
+    return any(p in GUARD_WORDS for p in parts) or param.lower() in GUARD_WORDS
+
+
 def print_report(hits: List[dict], root: str, verbose: bool = False,
                  engine: str = "rules") -> None:
+    for h in hits:
+        h["guards"] = guards_something(h.get("param", ""))
     hard = [h for h in hits if is_hard(h)]
     soft = [h for h in hits if not is_hard(h)]
+    guarded = [h for h in hits if h["guards"]]
 
     if hard:
         print(f"\n=== Documented name not in the signature ({len(hard)}) ===")
         for h in hard:
-            print(f"\n  {h['file']}:{h['line']}  {h['func']}()")
+            mark = "  [guard]" if h["guards"] else ""
+            print(f"\n  {h['file']}:{h['line']}  {h['func']}(){mark}")
             print(f"    docstring:  {h['param']}")
             print(f"    code:       {', '.join(h['sig'][:8])}")
     if soft:
         print(f"\n=== Documented default differs ({len(soft)}) ===")
         for h in soft[: (len(soft) if verbose else 30)]:
-            print(f"\n  {h['file']}:{h['line']}  {h['func']}()  {h['param']}")
+            mark = "  [guard]" if h["guards"] else ""
+            print(f"\n  {h['file']}:{h['line']}  {h['func']}()  {h['param']}{mark}")
             print(f"    docstring:  {h['doc_default']}")
             print(f"    code:       {h['real_default']}")
         if not verbose and len(soft) > 30:
@@ -697,12 +1140,23 @@ def print_report(hits: List[dict], root: str, verbose: bool = False,
     if gap:
         print(f"  interpreter is older:   {gap}")
     print(f"  functions with Parameters: {COUNTS['funcs']}")
+    unread = COUNTS.get("unread_docstrings", 0)
+    if unread:
+        documented = COUNTS['funcs'] + unread
+        share = 100 * COUNTS['funcs'] / documented
+        mark = "🔴 " if share < 50 else ""
+        print(f"  {mark}docstrings not read:    {unread} of {documented} documented"
+              f" ({share:.0f}% parsed). A dialect this file does not know,"
+              f" most often Sphinx `:param x:`")
     print(f"  properties skipped:     {COUNTS['props']} (docstring describes what they return)")
     # Printed even at zero, like every other line here: a dismissal nobody sees
     # is how a report gets cleaner instead of more honest.
     print(f"  author switched it off: {COUNTS['suppressed']} (`# numpydoc ignore=PR02` in the signature)")
     if COUNTS["compat_blind"]:
         print(f"  opaque decorator:       {COUNTS['compat_blind']} (cannot tell which extra names it accepts)")
+    if guarded:
+        print(f"  🔴 about a guard:         {len(guarded)}"
+              f" (the name reads as protective, so a wrong line here costs more)")
     print(common.findings_line(len(hard), len(soft)))
     print(stamp.line(__file__, ["common.py"]))
 

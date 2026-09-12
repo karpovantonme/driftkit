@@ -220,6 +220,132 @@ class TestReportedByUsers(unittest.TestCase):
 
 
 
+    # ------------------------------------------------------------------
+    # Learned on canonical/ubuntu.com, 12.08.2026: 613 of 618 findings were
+    # ours, not theirs. Four separate causes, one test each.
+    # ------------------------------------------------------------------
+
+    def _first(self, line):
+        """The first address a line yields after normalisation."""
+        for m in ld._URL.finditer(line):
+            url = ld.normalise(m.group(0))
+            if url is not None:
+                return url
+        return None
+
+    def test_escaped_content_does_not_leak_into_the_address(self):
+        """A recorded HTTP body keeps the page inside an escaped string. The
+        backslash and the pipe end the address instead of joining it."""
+        self.assertEqual(
+            self._first("body: https://assets.ubuntu.com/v1/3c16f2f2-webinar.png|x"),
+            "https://assets.ubuntu.com/v1/3c16f2f2-webinar.png")
+        self.assertEqual(
+            self._first('"https://assets.ubuntu.com/v1/3c16f2f2-webinar.png\\\\"'),
+            "https://assets.ubuntu.com/v1/3c16f2f2-webinar.png")
+
+    def test_a_bracket_in_the_file_name_survives(self):
+        """Asset names carry parentheses and plus signs. Cutting at the
+        opening bracket produced a stump that 404s honestly."""
+        self.assertEqual(
+            self._first("![x](https://assets.ubuntu.com/v1/02dc8e77-design%20(1).png)"),
+            "https://assets.ubuntu.com/v1/02dc8e77-design%20(1).png")
+        self.assertEqual(
+            self._first("see https://assets.ubuntu.com/v1/17-banner+(13).png here"),
+            "https://assets.ubuntu.com/v1/17-banner+(13).png")
+
+    def test_a_markdown_link_still_loses_its_closing_bracket(self):
+        """The other direction: an unpaired closing bracket belongs to the
+        markdown around the address, not to the address."""
+        self.assertEqual(
+            self._first("[Read the docs](https://ubuntu.com/blog/thing)"),
+            "https://ubuntu.com/blog/thing")
+
+    def test_html_entities_are_decoded(self):
+        """`&amp;` inside a query string used to cut the address in half,
+        because the semicolon ended the match."""
+        self.assertEqual(
+            self._first("url: https://analytics.twitter.com/i/adsct?txn_id=l4pwm&amp;p_id=Twitter"),
+            "https://analytics.twitter.com/i/adsct?txn_id=l4pwm&p_id=Twitter")
+
+    def test_a_trailing_semicolon_is_still_dropped(self):
+        """Letting the semicolon in must not swallow the one that ends a
+        statement."""
+        self.assertEqual(
+            self._first("@import https://fonts.example.org/x.css; body {}"),
+            "https://fonts.example.org/x.css")
+
+    def test_an_address_broken_by_a_space_is_thrown_away(self):
+        """An unpaired opening bracket means the real address continued past
+        a space. It cannot be repaired, so it is dropped rather than
+        reported as dead."""
+        self.assertIsNone(
+            self._first("img https://assets.ubuntu.com/v1/0c-[Webinar Recap].png"))
+
+    def test_a_recorded_http_session_is_recognised_by_content(self):
+        """VCR cassettes are not always kept in a directory we know by name."""
+        self.assertTrue(ld._CASSETTE.search("interactions:\n- request:\n"))
+        self.assertTrue(ld._CASSETTE.search("  recorded_with: VCR 4.0.2\n"))
+        self.assertFalse(ld._CASSETTE.search("# interactions with the API\n"))
+
+
+    def test_a_space_inside_an_attribute_does_not_cut_the_address(self):
+        """66 of 72 findings on canonical/ubuntu.com were asset names with a
+        real space in them, sitting inside an HTML attribute. A browser reads
+        to the closing quote and encodes the spaces."""
+        line = '<img src="https://assets.example.com/v1/hash-monitoring dashboard.png">'
+        m = next(ld._URL.finditer(line))
+        self.assertEqual(
+            ld.normalise(ld.extend_to_quote(line, m)),
+            "https://assets.example.com/v1/hash-monitoring%20dashboard.png")
+
+    def test_a_quote_earlier_in_the_line_is_not_mistaken_for_an_attribute(self):
+        """The address must not be stretched to a quote it does not belong to."""
+        line = 'text "quoted" then https://example.org/a/b more words here'
+        m = next(ld._URL.finditer(line))
+        self.assertEqual(
+            ld.normalise(ld.extend_to_quote(line, m)), "https://example.org/a/b")
+
+
+class TestFoundOnRealRun(unittest.TestCase):
+    """Four defects a live run on 6 projects turned up, 19.08.2026."""
+
+    def test_head_404_is_retried_with_get(self):
+        # app.koofr.net and friends answer 404 to HEAD and 200 to GET. Without
+        # the retry those went into the report as dead, one of them cited 16
+        # times in rclone's manual.
+        asked = []
+
+        class Fake(ld.Checker):
+            def _ask(self, url, method):
+                asked.append(method)
+                return "404" if method == "HEAD" else "200"
+
+        c = Fake(cache_dir=tempfile.mkdtemp(), pause=0)
+        self.assertEqual(c.check("https://example.com/x"), "200")
+        self.assertEqual(asked, ["HEAD", "GET"])
+
+    def test_an_unparsable_address_does_not_kill_the_run(self):
+        # A codespell pattern in pandas/pyproject.toml reached urllib and threw
+        # ValueError before any request, ending a run over 258 files.
+        c = ld.Checker(cache_dir=tempfile.mkdtemp(), pause=0)
+        verdict = c._ask("https://([w/.])+", "HEAD")
+        self.assertTrue(verdict.startswith("unparsable:"), verdict)
+
+    def test_a_quote_hiding_under_a_bracket_is_trimmed(self):
+        # `.../latest&quot;)` decodes to `.../latest")`. One pass strips the
+        # bracket and never revisits the quote, and a live endpoint is reported
+        # dead.
+        self.assertEqual(
+            ld.normalise("https://api.github.com/repos/x/y/releases/latest&quot;)"),
+            "https://api.github.com/repos/x/y/releases/latest",
+        )
+
+    def test_a_shell_that_404s_at_a_router_is_not_called_dead(self):
+        # crates.io returns its Ember shell with status 404 and draws the page
+        # in the browser. 27 of 32 findings on comprehensive-rust were this.
+        self.assertEqual(ld.classify("404", "https://crates.io/crates/serde"), "unverified")
+        self.assertEqual(ld.classify("404", "https://example.com/gone"), "dead")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

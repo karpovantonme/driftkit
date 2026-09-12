@@ -397,11 +397,21 @@ def build_descriptor_set(
         sys.exit("protoc could not parse the .proto files:\n" + res.stderr)
 
 
+class MissingDependency(RuntimeError):
+    """A check cannot run here, and that is not the same as finding nothing."""
+
+
 def parse_proto(proto_dir: str, includes: Sequence[str], skip: str = "") -> Dict[str, PMessage]:
+    # Same rule as in assertdrift: a missing dependency stops this check, not
+    # the process. In a sweep a `sys.exit` here kills every check that would
+    # have run afterwards, and in the log a dead tool looks exactly like a
+    # clean one.
     try:
         from google.protobuf import descriptor_pb2
     except ImportError:
-        sys.exit("the protobuf package for Python is missing. Install: pip3 install protobuf")
+        raise MissingDependency(
+            "the protobuf package for Python is missing. Install: pip3 install protobuf"
+        )
 
     with tempfile.TemporaryDirectory() as td:
         pb = os.path.join(td, "set.pb")
@@ -1534,9 +1544,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with open(args.aliases, encoding="utf-8") as fh:
             aliases = json.load(fh)
 
-    findings, cov = run(
-        args.proto_dir, args.openapi, args.include, aliases, args.exclude_proto, args.skip_proto_file
-    )
+    try:
+        findings, cov = run(
+            args.proto_dir, args.openapi, args.include, aliases,
+            args.exclude_proto, args.skip_proto_file
+        )
+    except MissingDependency as exc:
+        # Exit code 2 says "could not check", distinct from 0 "clean" and
+        # 1 "found something". A sweep can tell the three apart; a dead
+        # process could not be told from a clean one.
+        print(f"\n=== NOT RUN ===\n  {exc}")
+        return 2
     print_report(findings, cov, args)
 
     if args.json:

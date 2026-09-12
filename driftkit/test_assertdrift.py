@@ -22,6 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import assertdrift as ad  # noqa: E402
 
+# Without pyyaml the tool reads nothing, so every test here would fail for a
+# reason that has nothing to do with the code under test. Skipping says that
+# out loud instead; the tool itself now degrades the same way rather than
+# calling sys.exit and taking a whole sweep down with it.
+needs_yaml = unittest.skipIf(ad.yaml is None, "pyyaml is not installed")
+
 TRAEFIK = os.path.expanduser("~/Projects/oss/traefik/traefik-helm-chart")
 HAS_TRAEFIK = os.path.isdir(TRAEFIK)
 
@@ -61,6 +67,7 @@ tests:
 """
 
 
+@needs_yaml
 class TestKnownCase(unittest.TestCase):
     """traefik before pull request #1955."""
 
@@ -84,6 +91,7 @@ class TestKnownCase(unittest.TestCase):
         self.assertIn("must fail", f.probe)
 
 
+@needs_yaml
 class TestSilence(unittest.TestCase):
     def test_legit_siblings_are_not_findings(self):
         """`template`, `documentIndex` and `not` are assertion modifiers.
@@ -146,6 +154,7 @@ tests:
         self.assertEqual(rep.files, 0)
 
 
+@needs_yaml
 class TestOtherAssertions(unittest.TestCase):
     def test_equal_missing_its_path_and_value(self):
         body = """suite: s
@@ -174,6 +183,7 @@ tests:
 
 
 @unittest.skipUnless(HAS_TRAEFIK, "no traefik-helm-chart clone")
+@needs_yaml
 class TestOnRealChart(unittest.TestCase):
     """Negative control: after pull request #1955 there is nothing there."""
 
