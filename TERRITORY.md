@@ -113,3 +113,62 @@ Working through the Doxygen tags across the whole organisation, one library at a
 ## Add yourself below
 
 Copy the shape above: your handle, how to reach you, the projects you are on. Project names are enough, no need to say what you are fixing.
+
+## Dmitry Rantovov ([@darkdi](https://github.com/darkdi))
+
+PHP and Bitrix by trade, working outward from there. Reachable through issues on
+this repository.
+
+| Organisation | Pull requests |
+|---|---:|
+| `bagisto/*` | 3 |
+| `statamic/*` | 2 |
+| `raycast/*` | 2 |
+| `astropy/*` | 2 |
+| `InvoicePlane/*` | 1 |
+| `dask/*` | 1 |
+| `getgrav/*` | 1 |
+| `home-assistant/*` | 1 |
+| `laravel/*` | 1 |
+| `nlohmann/*` | 1 |
+| `php-curl-class/*` | 1 |
+| `tesseract-ocr/*` | 1 |
+
+### Projects with pull requests open or merged
+
+- `InvoicePlane/InvoicePlane`
+- `astropy/astropy`
+- `bagisto/bagisto`
+- `dask/dask`
+- `getgrav/grav`
+- `home-assistant/core`
+- `laravel/telescope`
+- `nlohmann/json`
+- `php-curl-class/php-curl-class`
+- `raycast/extensions`
+- `statamic/cms`
+- `tesseract-ocr/tesseract`
+
+### Checked and clean, no findings
+
+Not worth a second pass: `EasyAdminBundle`, `FreshRSS`, `biopython`, `firefly-iii`,
+`fmt`, `godot`, `imgui`, `kimai`, `libuv`, `libzmq`, `mautic`, `obs-studio`,
+`poweradmin`, `spdlog`, `zarr-python`.
+
+### False positives worth knowing about
+
+Places where the checker fires but the documentation is correct:
+
+- `flarum/framework` — 20 of 20. A modern PHPStan type carries its own named
+  arguments inside parentheses: `@param (callable(Configurator $configurator): void)|class-string $callback`.
+  Taking the first `$var` in the line grabs `$configurator` rather than `$callback`.
+- `libgit2/libgit2` — 22 of 22. `typedef int (*git_commit_create_cb)(...)` and the
+  `GIT_CALLBACK` macro are not parsed as declarations, so every documented
+  argument of the callback is reported as missing. Tell-tale sign: all findings
+  sit on one or two line numbers.
+- `Dolibarr/dolibarr` — all in `htdocs/includes/sabre/`, a vendored library.
+- `pixelfed/pixelfed` — `app/Util/Lexer/` looks first-party but the header says
+  `Copyright © 2010, Nick Pope`: vendored twitter-text. Check the file header,
+  not just the path.
+- `duckdb/duckdb` — the findings sit in a file that is corrupt (one class
+  declared twice, one line spliced from two) and included nowhere.
