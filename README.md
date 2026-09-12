@@ -52,6 +52,7 @@ A real run, not an illustration. 11 of those 16 sit in `archive/`, which is why 
 | Tool | What it compares |
 |---|---|
 | `docdrift` | numpydoc `Parameters` against the real Python signature |
+| `rstdrift` | Sphinx `:param:` and epytext `@param` against the same signature |
 | `doxdrift` | Doxygen `\param` and `\tparam` against the real C++ declaration |
 | `swiftdrift` | a Swift `- Parameter` against the declaration under it, without building the package |
 | `paramdrift` | a documented parameter name against the signature under it, in JavaScript, TypeScript, Java, C#, PHP, Ruby and Rust |
